@@ -37,6 +37,20 @@ uv run python main.py --url https://www.bilibili.com/video/BVxxxxxxx --output da
 
 运行结束后，终端会打印本轮抓取到的评论总数，并在指定位置生成结果文件。JSON 文件包含视频 BV 号、总评论数与评论数组；CSV 则按列展开评论 ID、父评论 ID、用户信息、点赞数等字段。
 
+### 写入 Postgres
+
+传入数据库连接串即可把抓取到的评论同步写入 Postgres（按 `comment_id` 去重覆盖）：
+
+```bash
+uv run python main.py --url https://www.bilibili.com/video/BVxxxxxxx \
+  --pg-dsn postgresql://user:pass@host:5432/dbname \
+  --pg-table bili_comments
+```
+
+- CLI 支持 `--pg-dsn` / `--pg-table`，也可用环境变量 `APP_PG_DSN` / `POSTGRES_DSN` 和 `APP_PG_TABLE` / `POSTGRES_TABLE` 覆盖表名（默认 `comments`）。
+- Web 服务模式同样读取上述环境变量；表结构启动时自动创建，包含 `comment_id`、父评论 ID、用户信息、点赞数、`bvid/aid`、视频标题等字段。
+- 当配置了 Postgres 时，抓取结果仅写入数据库，不再生成本地 JSON/CSV 文件，重新“同步”同一任务会增量写入新评论；下载时可选择 JSON 或 CSV，直接从数据库导出。
+
 ## Web 可视化面板
 
 ```bash
@@ -45,8 +59,8 @@ uv run python main.py --serve --host 0.0.0.0 --port 8000 --data-dir data
 
 - 默认同时可以并行解析 2 个任务，方便多位用户同时工作；如果云主机性能更好，可以通过环境变量调整，例如 `APP_MAX_WORKERS=4 python main.py --serve ...`，若设置为 1 则恢复单线程。
 - 每位用户拥有独立账号密码，可在登录页直接“注册 + 登录”；首次注册自动接管旧版（单用户）遗留任务；
-- 左侧表单支持一次粘贴多条链接，任务会顺序执行，状态实时刷新，支持重试与删除；
-- 详情页内可直接跳转到 B 站、复制链接、重试或删除任务，并在页面内预览部分评论；
+- 左侧表单支持一次粘贴多条链接，任务会顺序执行，状态实时刷新，支持重试、同步与删除；
+- 详情页内提供全量评论列表（分页 / 排序 / 搜索），可跳转到 B 站回复、复制链接、重试或同步任务；
 - 后端使用 SQLite 记录任务与用户信息，导出文件存储于 `data/exports/`，默认 JSON，也支持 CSV；
 - 任务列表桌面端为表格、移动端为卡片视图，复制按钮/状态徽章在两端风格一致。
 
@@ -101,6 +115,7 @@ CI workflow 新增 `docker` 作业，会在推送到 `main` 分支时构建并�
 - 推荐在修改后运行 `python main.py --url <BV号>` 验证核心流程。
 - 添加或调整功能前，请运行 `python -m pytest -q` 保障行为稳定。
 - 提交前执行 `python -m black main.py tests/ pc/` 和 `ruff check .` 以保持风格一致。
+- 若遇到 412 风控，请提供真实浏览器 UA：`--user-agent "Mozilla/5.0 ... Chrome/125..."` 或环境变量 `APP_USER_AGENT`，并确保上传的 `storage_state` 含有效 Cookie。
 
 ## 常见问题
 - 若 Playwright 无法启动浏览器，请确认已执行 `playwright install chromium`。

@@ -1,13 +1,14 @@
 services:
-  pc:
-    build:
-      context: .
-    image: pc-local:latest
-    ports:
-      - "8000:8000"
+  postgres:
+    image: postgres:18.1
     environment:
-      APP_SESSION_SECRET: "change-me"
-      APP_MAX_WORKERS: "2"
+      POSTGRES_PASSWORD: "change-me"
+    ports:
+      - "5432:5432"
     volumes:
-      - ./data:/data
+      - pgdata:/var/lib/postgresql/18/main
     restart: unless-stopped
+
+volumes:
+  pgdata:
+    driver: local

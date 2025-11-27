@@ -84,6 +84,39 @@ class TaskStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS comment_tags (
+                    comment_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    tags TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (comment_id, user_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_agents (
+                    user_id TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    ua TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, label)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS auth_states (
+                    user_id TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, label)
+                )
+                """
+            )
             # 这里确保旧表也有 user_id 列
             columns = [row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()]
             if "user_id" not in columns:
@@ -124,6 +157,7 @@ class TaskStore:
         export_format: str,
         timeout: int,
         user_id: str = "default",
+        bvid: Optional[str] = None,
     ) -> TaskRecord:
         now = utcnow()
         with self._connect() as conn:
@@ -131,10 +165,10 @@ class TaskStore:
                 """
                 INSERT INTO tasks (
                     id, raw_url, normalized_url, status, export_format, timeout,
-                    created_at, updated_at, user_id
-                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+                    created_at, updated_at, user_id, bvid
+                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
                 """,
-                (task_id, raw_url, normalized_url, export_format, timeout, now, now, user_id),
+                (task_id, raw_url, normalized_url, export_format, timeout, now, now, user_id, bvid),
             )
             conn.commit()
         task = self.get_task(task_id)
@@ -240,6 +274,101 @@ class TaskStore:
     def adopt_default_tasks(self, user_id: str) -> None:
         with self._connect() as conn:
             conn.execute("UPDATE tasks SET user_id = ? WHERE user_id = 'default'", (user_id,))
+            conn.commit()
+
+    def set_comment_tags(self, *, comment_id: str, user_id: str, tags: list[str]) -> None:
+        normalized = [t.strip() for t in tags if t.strip()]
+        tags_str = ",".join(normalized)
+        now = utcnow()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO comment_tags (comment_id, user_id, tags, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(comment_id, user_id) DO UPDATE SET tags = excluded.tags, updated_at = excluded.updated_at
+                """,
+                (comment_id, user_id, tags_str, now),
+            )
+            conn.commit()
+
+    def get_comment_tags(self, *, comment_ids: list[str], user_id: str) -> dict[str, list[str]]:
+        if not comment_ids:
+            return {}
+        placeholders = ",".join("?" for _ in comment_ids)
+        sql = f"SELECT comment_id, tags FROM comment_tags WHERE user_id = ? AND comment_id IN ({placeholders})"
+        params: list[str] = [user_id] + comment_ids
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        result: dict[str, list[str]] = {}
+        for row in rows:
+            tags = [t for t in (row["tags"] or "").split(",") if t]
+            result[row["comment_id"]] = tags
+        return result
+
+    def get_comment_ids_by_tag(self, *, user_id: str, tag: str) -> list[str]:
+        like = f"%{tag.strip()}%"
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT comment_id FROM comment_tags WHERE user_id = ? AND tags LIKE ?",
+                (user_id, like),
+            ).fetchall()
+        return [row["comment_id"] for row in rows]
+
+    def save_user_agent(self, *, user_id: str, label: str, ua: str) -> None:
+        now = utcnow()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO user_agents (user_id, label, ua, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, label) DO UPDATE SET ua=excluded.ua, updated_at=excluded.updated_at
+                """,
+                (user_id, label.strip() or "default", ua.strip(), now),
+            )
+            conn.commit()
+
+    def list_user_agents(self, *, user_id: str) -> list[tuple[str, str]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT label, ua FROM user_agents WHERE user_id = ? ORDER BY updated_at DESC",
+                (user_id,),
+            ).fetchall()
+        return [(row["label"], row["ua"]) for row in rows]
+
+    def delete_user_agent(self, *, user_id: str, label: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM user_agents WHERE user_id = ? AND label = ?", (user_id, label))
+            conn.commit()
+
+    def save_auth_state(self, *, user_id: str, label: str, path: str) -> None:
+        now = utcnow()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO auth_states (user_id, label, path, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, label) DO UPDATE SET path=excluded.path, updated_at=excluded.updated_at
+                """,
+                (user_id, label.strip() or "default", path, now),
+            )
+            conn.commit()
+
+    def list_auth_states(self, *, user_id: str) -> list[tuple[str, str]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT label, path FROM auth_states WHERE user_id = ? ORDER BY updated_at DESC",
+                (user_id,),
+            ).fetchall()
+        return [(row["label"], row["path"]) for row in rows]
+
+    def delete_auth_state(self, *, user_id: str, label: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM auth_states WHERE user_id = ? AND label = ?", (user_id, label))
+            conn.commit()
+
+    def delete_all_auth_states(self, *, user_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM auth_states WHERE user_id = ?", (user_id,))
             conn.commit()
 
 

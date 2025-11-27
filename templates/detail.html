@@ -27,8 +27,19 @@
             <span class="badge status-wait">{{ _("status_pending") }}</span>
           {% endif %}
         </div>
+        {% if task.status == 'failed' and task.error %}
+        <div class="alert alert-error" style="margin-bottom: 0.75rem; word-break: break-all;">
+          {{ task.error }}
+        </div>
+        {% endif %}
         
-        <h1 style="margin: 0 0 1rem 0; font-size: 1.5rem; line-height: 1.3;">{{ task.title or _("parsing") }}</h1>
+        <h1 style="margin: 0 0 1rem 0; font-size: 1.5rem; line-height: 1.3;">
+          {% if task.status == 'failed' %}
+            {{ task.title or _("failed_title") }}
+          {% else %}
+            {{ task.title or _("parsing") }}
+          {% endif %}
+        </h1>
         
         <div class="text-muted text-sm font-mono" style="word-break: break-all; background: var(--bg-subtle); padding: 0.75rem; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
           {{ task.normalized_url }}
@@ -40,10 +51,18 @@
           
           <div style="flex: 1;"></div>
           
-          {% if task.status == 'completed' and task.output_path %}
-          <a href="/tasks/{{ task.id }}/download" class="btn btn-primary">
-            <svg class="icon"><use href="#icon-download"></use></svg> {{ _("download_data") }}
-          </a>
+          {% if task.status == 'completed' %}
+          <form method="get" action="/tasks/{{ task.id }}/download" class="flex-gap" style="align-items: center;">
+            <div class="select-wrapper" style="min-width: 110px; max-width: 140px;">
+              <select name="format" class="select" style="height: 40px; padding: 6px 12px;">
+                <option value="json">JSON</option>
+                <option value="csv">CSV</option>
+              </select>
+            </div>
+            <button type="submit" class="btn btn-primary" title="{{ _('download') }}">
+              <svg class="icon"><use href="#icon-download"></use></svg>
+            </button>
+          </form>
           {% endif %}
           
           {% if task.status == 'failed' %}
@@ -54,6 +73,11 @@
           <form method="post" action="/tasks/{{ task.id }}/delete">
             <button type="submit" class="btn btn-danger-soft">{{ _("delete") }}</button>
           </form>
+          {% if task.status != 'running' %}
+          <form method="post" action="/tasks/{{ task.id }}/sync">
+            <button type="submit" class="btn btn-secondary">{{ _("sync") }}</button>
+          </form>
+          {% endif %}
         </div>
       </div>
     </div>
@@ -64,30 +88,198 @@
     </div>
     {% endif %}
 
-    <!-- Preview -->
+    <!-- Filters + Comments -->
     <div class="card">
-      <div class="card-header">
-        <h3 class="card-title">{{ _("latest_comments") }}</h3>
+      <div class="card-header" style="flex-wrap: wrap; gap: 0.5rem;">
+        <h3 class="card-title" style="margin-right: auto;">{{ _("latest_comments") }}</h3>
+        <span class="text-muted text-sm">{{ _("results_count", count=filtered_total) }}</span>
+        {% if using_db %}
+        <span class="badge status-done">{{ _("source_db") }}</span>
+        {% else %}
+        <span class="badge status-wait">{{ _("source_file") }}</span>
+        {% endif %}
       </div>
       <div class="card-body">
-        {% if preview %}
-          <div style="display: flex; flex-direction: column; gap: 1.5rem;">
-            {% for c in preview %}
-            <div style="border-bottom: 1px solid var(--border-color); padding-bottom: 1rem;">
-              <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
-                <strong class="text-sm">{{ c.user_name or 'User' }}</strong>
-                <span class="text-muted text-sm">{{ c.publish_time }}</span>
+        <form method="get" class="grid-main" style="gap: 0.75rem; margin-bottom: 1rem;">
+          <input type="hidden" name="page" value="1">
+          <div class="form-group">
+            <label class="text-sm text-muted">{{ _("search_keyword") }}</label>
+            <input type="text" name="q" value="{{ q }}" class="input" placeholder="{{ _('search_placeholder') }}">
+          </div>
+          <div class="form-group">
+            <label class="text-sm text-muted">{{ _("search_user") }}</label>
+            <input type="text" name="user_filter" value="{{ user_filter }}" class="input" placeholder="{{ _('search_user_placeholder') }}">
+          </div>
+          <div class="form-group">
+            <label class="text-sm text-muted">{{ _("sort_by") }}</label>
+            <div class="select-wrapper">
+              <select name="sort" class="select">
+                <option value="time" {% if sort == 'time' %}selected{% endif %}>{{ _("sort_time") }}</option>
+                <option value="likes" {% if sort == 'likes' %}selected{% endif %}>{{ _("sort_likes") }}</option>
+                <option value="sub" {% if sort == 'sub' %}selected{% endif %}>{{ _("sort_sub") }}</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="text-sm text-muted">{{ _("order") }}</label>
+            <div class="select-wrapper">
+              <select name="order" class="select">
+                <option value="desc" {% if order == 'desc' %}selected{% endif %}>{{ _("order_desc") }}</option>
+                <option value="asc" {% if order == 'asc' %}selected{% endif %}>{{ _("order_asc") }}</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="text-sm text-muted">{{ _("comment_type") }}</label>
+            <div class="select-wrapper">
+              <select name="kind" class="select">
+                <option value="all" {% if kind == 'all' %}selected{% endif %}>{{ _("type_all") }}</option>
+                <option value="main" {% if kind == 'main' %}selected{% endif %}>{{ _("type_main") }}</option>
+                <option value="sub" {% if kind == 'sub' %}selected{% endif %}>{{ _("type_sub") }}</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="text-sm text-muted">{{ _("tag_filter") }}</label>
+            <input type="text" name="tag" value="{{ tag }}" class="input">
+          </div>
+          <div class="form-group">
+            <label class="text-sm text-muted">{{ _("page_size") }}</label>
+            <div class="select-wrapper">
+              <select name="size" class="select">
+                {% for opt in [10,20,50,100] %}
+                <option value="{{ opt }}" {% if page_size == opt %}selected{% endif %}>{{ opt }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+          <div class="form-group" style="display: flex; align-items: flex-end;">
+            <button type="submit" class="btn btn-primary" style="width: 100%;">{{ _("apply_filters") }}</button>
+          </div>
+        </form>
+
+        {% if comments %}
+        <div style="display: flex; flex-direction: column; gap: 1rem;">
+          {% for c in comments %}
+          <div id="c-{{ c.comment_id }}" style="border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 1rem;">
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+              <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                <strong>{{ c.user_name or 'User' }}</strong>
+                {% if c.user_id %}
+                  <span class="text-muted font-mono text-sm">#{{ c.user_id }}</span>
+                  <a href="https://space.bilibili.com/{{ c.user_id }}" target="_blank" class="text-link">{{ _("user_profile") }}</a>
+                  <a href="https://message.bilibili.com/#/whisper/mid{{ c.user_id }}" target="_blank" class="text-link">{{ _("user_dm") }}</a>
+                {% endif %}
+                {% if c.is_sub_reply %}
+                <span class="badge status-wait" style="font-size: 0.7rem;">{{ _("badge_sub") }}</span>
+                {% else %}
+                <span class="badge status-run" style="font-size: 0.7rem;">{{ _("badge_main") }}</span>
+                {% endif %}
               </div>
-              <p style="margin: 0 0 0.5rem 0; font-size: 0.95rem; color: var(--text-secondary);">{{ c.content }}</p>
+              <span class="text-muted text-sm">{{ c.publish_time }}</span>
+            </div>
+            <p style="margin: 0.5rem 0 0.75rem 0; font-size: 0.95rem; line-height: 1.5; color: var(--text-secondary); white-space: pre-wrap;">{{ c.content }}</p>
+            {% if c.parent %}
+            <div style="background: var(--bg-subtle); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 0.75rem; margin-bottom: 0.75rem;">
+              <div class="text-muted text-sm" style="margin-bottom: 0.35rem;">{{ _("parent_label") }}</div>
+              <div style="display: flex; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+                <div class="flex-gap text-sm">
+                  <strong>{{ c.parent.user_name or 'User' }}</strong>
+                  {% if c.parent.user_id %}<span class="text-muted font-mono">#{{ c.parent.user_id }}</span>{% endif %}
+                </div>
+                <span class="text-muted text-sm">{{ c.parent.publish_time }}</span>
+              </div>
+              <div style="color: var(--text-secondary); font-size: 0.9rem; white-space: pre-wrap;">{{ c.parent.content }}</div>
+            </div>
+            {% endif %}
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;">
               <div class="text-sm text-muted flex-gap">
                 <span>👍 {{ c.like_count }}</span>
-                {% if c.is_sub_reply %}<span class="badge status-wait" style="font-size: 0.65rem;">Reply</span>{% endif %}
+                <span>💬 {{ c.sub_count }}</span>
+                {% if c.parent_comment_id %}
+                <span class="text-muted">{{ _("reply_to") }} {{ c.parent_comment_id }}</span>
+                {% endif %}
+              </div>
+              <div class="flex-gap">
+                {% if task.bvid %}
+                  <a class="btn btn-secondary" style="padding: 0.35rem 0.6rem;" href="https://www.bilibili.com/video/{{ task.bvid }}#reply{{ c.comment_id }}" target="_blank">
+                    {{ _("reply_on_bili") }}
+                  </a>
+                {% endif %}
+                <button class="btn btn-secondary" style="padding: 0.35rem 0.6rem;" data-copy="{{ c.comment_id }}">
+                  {{ _("copy") }} ID
+                </button>
               </div>
             </div>
-            {% endfor %}
+            <div style="margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;">
+              <div class="flex-gap">
+                {% for t in c.tags %}
+                  <span class="badge status-wait" style="font-size: 0.7rem;">#{{ t }}</span>
+                {% endfor %}
+                {% if not c.tags %}
+                  <span class="text-muted text-xs">{{ _("no_tags") }}</span>
+                {% endif %}
+              </div>
+              <form method="post" action="/comments/{{ c.comment_id }}/tags" class="flex-gap" style="align-items: center;">
+                <input type="hidden" name="task_id" value="{{ task.id }}">
+                <input type="hidden" name="page" value="{{ page }}">
+                <input type="hidden" name="q" value="{{ q }}">
+                <input type="hidden" name="user_filter" value="{{ user_filter }}">
+                <input type="hidden" name="kind" value="{{ kind }}">
+                <input type="hidden" name="tag" value="{{ tag }}">
+                <input type="hidden" name="sort" value="{{ sort }}">
+                <input type="hidden" name="order" value="{{ order }}">
+                <input type="text" name="tags" class="input" style="height: 32px; width: 180px;" value="{{ '#'+c.tags|join(' #') if c.tags }}">
+                <button type="submit" class="btn btn-secondary" style="padding: 0.35rem 0.6rem;">
+                  {{ _("apply_tags") }}
+                </button>
+              </form>
+            </div>
+            {% if c.children %}
+            <div style="margin-top: 0.75rem; border-top: 1px dashed var(--border-color); padding-top: 0.75rem;">
+              <div class="text-muted text-sm" style="margin-bottom: 0.35rem;">{{ _("child_label") }} ({{ c.sub_count }})</div>
+              <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                {% for child in c.children %}
+                <div style="background: var(--bg-subtle); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 0.6rem;">
+                  <div style="display: flex; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+                    <div class="flex-gap text-sm">
+                      <strong>{{ child.user_name or 'User' }}</strong>
+                      {% if child.user_id %}<span class="text-muted font-mono">#{{ child.user_id }}</span>{% endif %}
+                    </div>
+                    <span class="text-muted text-sm">{{ child.publish_time }}</span>
+                  </div>
+                  <div class="text-sm" style="color: var(--text-secondary); white-space: pre-wrap;">{{ child.content }}</div>
+                  <div class="text-sm text-muted flex-gap" style="margin-top: 0.35rem;">
+                    <span>👍 {{ child.like_count }}</span>
+                    <span class="badge status-wait" style="font-size: 0.65rem;">{{ _("badge_sub") }}</span>
+                  </div>
+                </div>
+                {% endfor %}
+                {% if c.sub_count > c.children|length %}
+                <div class="text-muted text-xs">{{ _("more_replies", count=c.sub_count - c.children|length) }}</div>
+                {% endif %}
+              </div>
+            </div>
+            {% endif %}
           </div>
+          {% endfor %}
+        </div>
+
+        <!-- Pagination -->
+        {% if total_pages > 1 %}
+        {% set base_params = "q=" ~ q|urlencode ~ "&user_filter=" ~ user_filter|urlencode ~ "&sort=" ~ sort ~ "&order=" ~ order ~ "&kind=" ~ kind ~ "&size=" ~ page_size %}
+        <div style="margin-top: 1.5rem; display: flex; justify-content: center; gap: 1rem; align-items: center;">
+          {% if page > 1 %}
+          <a href="/tasks/{{ task.id }}?page={{ page - 1 }}&{{ base_params }}" class="btn btn-secondary">{{ _("prev") }}</a>
+          {% endif %}
+          <span class="text-muted text-sm">{{ _("page_info", page=page, total=total_pages) }}</span>
+          {% if page < total_pages %}
+          <a href="/tasks/{{ task.id }}?page={{ page + 1 }}&{{ base_params }}" class="btn btn-secondary">{{ _("next") }}</a>
+          {% endif %}
+        </div>
+        {% endif %}
         {% else %}
-          <div class="text-muted" style="text-align: center; padding: 2rem;">{{ _("no_preview") }}</div>
+        <div class="text-muted" style="text-align: center; padding: 2rem;">{{ _("no_preview") }}</div>
         {% endif %}
       </div>
     </div>
@@ -95,24 +287,6 @@
 
   <!-- Right Column: Meta -->
   <div style="display: flex; flex-direction: column; gap: 1.5rem;">
-    <div class="card">
-      <div class="card-header">
-        <h3 class="card-title">{{ _("status") }}</h3>
-      </div>
-      <div class="card-body">
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
-          <div>
-            <div class="text-sm text-muted">{{ _("comments") }}</div>
-            <div style="font-size: 1.5rem; font-weight: 600;">{{ task.total_comments or 0 }}</div>
-          </div>
-          <div>
-            <div class="text-sm text-muted">{{ _("format") }}</div>
-            <div style="font-size: 1.5rem; font-weight: 600;">{{ task.export_format|upper }}</div>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <div class="card">
       <div class="card-header">
         <h3 class="card-title">Metadata</h3>
@@ -130,12 +304,53 @@
           <div class="text-muted">{{ _("bvid") }}</div>
           <div class="font-mono">{{ task.bvid or '-' }}</div>
         </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">{{ _("stats_title") }}</h3>
+      </div>
+      <div class="card-body" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
         <div>
-          <div class="text-muted">{{ _("output_path") }}</div>
-          <div class="font-mono text-muted" style="word-break: break-all;">{{ task.output_path or 'Pending' }}</div>
+          <div class="text-muted text-sm">{{ _("comments") }}</div>
+          <div style="font-size: 1.4rem; font-weight: 600;">{{ comment_stats.total }}</div>
+        </div>
+        <div>
+          <div class="text-muted text-sm">{{ _("stats_main") }}</div>
+          <div style="font-size: 1.2rem;">{{ comment_stats.main_count }}</div>
+        </div>
+        <div>
+          <div class="text-muted text-sm">{{ _("stats_sub") }}</div>
+          <div style="font-size: 1.2rem;">{{ comment_stats.sub_count }}</div>
+        </div>
+        <div>
+          <div class="text-muted text-sm">{{ _("stats_users") }}</div>
+          <div style="font-size: 1.2rem;">{{ comment_stats.unique_users }}</div>
+        </div>
+        <div>
+          <div class="text-muted text-sm">{{ _("stats_max_like") }}</div>
+          <div style="font-size: 1.2rem;">{{ comment_stats.max_likes }}</div>
+        </div>
+        <div>
+          <div class="text-muted text-sm">{{ _("stats_avg_like") }}</div>
+          <div style="font-size: 1.2rem;">{{ '%.1f'|format(comment_stats.avg_likes) }}</div>
         </div>
       </div>
     </div>
   </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  (function() {
+    const isRunning = {{ 'true' if task.status == 'running' else 'false' }};
+    if (isRunning) {
+      setTimeout(() => {
+        location.reload();
+      }, 10000);
+    }
+  })();
+</script>
 {% endblock %}

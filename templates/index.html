@@ -10,6 +10,7 @@
     <div class="card-body">
       {% if created %}<div class="alert alert-success">{{ _("task_created", count=created) }}</div>{% endif %}
       {% if failed %}<div class="alert alert-error">{{ _("link_error", count=failed) }}</div>{% endif %}
+      {% if synced_task %}<div class="alert alert-success">{{ _("sync_success") }}</div>{% endif %}
       {% if form_errors %}
       <div class="alert alert-error">
         {% for err in form_errors %}<div>{{ err }}</div>{% endfor %}
@@ -26,20 +27,23 @@
             required
           ></textarea>
         </div>
-        <div class="form-group">
-          <label class="text-sm text-muted" style="display:block; margin-bottom:0.4rem">{{ _("export_format") }}</label>
-          <div class="select-wrapper">
-            <select name="export_format" class="select">
-              <option value="json">JSON</option>
-              <option value="csv">CSV</option>
-            </select>
-          </div>
-        </div>
+        <input type="hidden" name="export_format" value="json" />
         <button type="submit" class="btn btn-primary" style="width: 100%;">
           <svg class="icon"><use href="#icon-copy"></use></svg>
           {{ _("submit_task") }}
         </button>
       </form>
+
+      {% if ua_list %}
+      <div style="margin-top: 1rem; border-top: 1px solid var(--border-color); padding-top: 1rem;">
+        <div class="text-sm text-muted" style="margin-bottom: 0.5rem;">{{ _("ua_saved") }}</div>
+        <div class="flex-gap" style="flex-wrap: wrap;">
+          {% for label, ua in ua_list %}
+            <span class="badge status-wait" title="{{ ua }}">{{ label }}</span>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
     </div>
   </section>
 
@@ -99,8 +103,15 @@
         <tr>
           <td>
             <div style="font-weight: 600; margin-bottom: 0.25rem;" title="{{ task.title }}">
-              {{ task.title or _("parsing") }}
+              {% if task.status == 'failed' %}
+                {{ task.title or _("failed_title") }}
+              {% else %}
+                {{ task.title or _("parsing") }}
+              {% endif %}
             </div>
+            {% if task.status == 'failed' and task.error %}
+            <div class="text-sm" style="color: var(--color-danger); word-break: break-all;">{{ task.error }}</div>
+            {% endif %}
             <div class="flex-gap text-sm text-muted">
           <span class="truncate font-mono">{{ task.normalized_url }}</span>
               <button class="btn btn-secondary" style="padding: 2px 6px; height: 24px;" data-copy="{{ task.normalized_url }}" title="{{ _('copy') }}">
@@ -127,15 +138,30 @@
               <a href="/tasks/{{ task.id }}" class="btn btn-secondary" style="padding: 0.4rem;" title="{{ _('detail') }}">
                 <svg class="icon"><use href="#icon-eye"></use></svg>
               </a>
-              {% if task.status == 'completed' and task.output_path %}
-              <a href="/tasks/{{ task.id }}/download" class="btn btn-secondary" style="padding: 0.4rem;" title="{{ _('download') }}">
-                <svg class="icon"><use href="#icon-download"></use></svg>
-              </a>
+              {% if task.status == 'completed' %}
+              <form method="get" action="/tasks/{{ task.id }}/download" class="flex-gap" style="align-items: center;">
+                <div class="select-wrapper" style="min-width: 92px; max-width: 110px;">
+                  <select name="format" class="select" style="height: 36px; padding: 4px 10px;">
+                    <option value="json">JSON</option>
+                    <option value="csv">CSV</option>
+                  </select>
+                </div>
+                <button type="submit" class="btn btn-secondary" style="padding: 0.45rem 0.6rem;" title="{{ _('download') }}">
+                  <svg class="icon"><use href="#icon-download"></use></svg>
+                </button>
+              </form>
+              {% endif %}
+              {% if task.status != 'running' %}
+              <form method="post" action="/tasks/{{ task.id }}/sync?page={{ page }}{% if query %}&q={{ query|urlencode }}{% endif %}" style="display: inline;">
+                <button type="submit" class="btn btn-secondary" style="padding: 0.4rem;" title="{{ _('sync') }}">
+                   <svg class="icon"><use href="#icon-repeat"></use></svg>
+                </button>
+              </form>
               {% endif %}
               {% if task.status == 'failed' %}
               <form method="post" action="/tasks/{{ task.id }}/retry" style="display: inline;">
                 <button type="submit" class="btn btn-danger-soft" style="padding: 0.4rem;" title="{{ _('retry') }}">
-                   <svg class="icon"><use href="#icon-refresh"></use></svg>
+                   <svg class="icon"><use href="#icon-rotate"></use></svg>
                 </button>
               </form>
               {% endif %}
@@ -161,17 +187,19 @@
     <div class="mobile-view">
       {% for task in tasks %}
       <div class="mobile-item">
-        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.5rem;">
-          <strong style="font-size: 1rem; line-height: 1.4; margin-right: 1rem;">{{ task.title or _("parsing") }}</strong>
-          {% if task.status == 'completed' %}
-            <span class="badge status-done">{{ _("status_done") }}</span>
-          {% elif task.status == 'running' %}
-            <span class="badge status-run">{{ _("status_running") }}</span>
-          {% elif task.status == 'failed' %}
-            <span class="badge status-fail">{{ _("status_failed") }}</span>
-          {% else %}
-            <span class="badge status-wait">{{ _("status_pending") }}</span>
-          {% endif %}
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.5rem; gap: 0.5rem;">
+          <strong style="font-size: 1rem; line-height: 1.4; margin-right: 1rem; flex: 1; min-width: 0;">{{ task.title or _("parsing") }}</strong>
+          <span style="flex-shrink: 0; min-width: 96px; display: inline-flex; justify-content: flex-end;">
+            {% if task.status == 'completed' %}
+              <span class="badge status-done">{{ _("status_done") }}</span>
+            {% elif task.status == 'running' %}
+              <span class="badge status-run">{{ _("status_running") }}</span>
+            {% elif task.status == 'failed' %}
+              <span class="badge status-fail">{{ _("status_failed") }}</span>
+            {% else %}
+              <span class="badge status-wait">{{ _("status_pending") }}</span>
+            {% endif %}
+          </span>
         </div>
         <div class="flex-gap text-sm text-muted" style="margin-bottom: 1rem;">
           <span class="truncate font-mono" style="flex: 1; min-width: 0;">{{ task.normalized_url }}</span>
@@ -182,17 +210,40 @@
         <div style="display: flex; justify-content: space-between; align-items: center; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
           <span class="text-sm font-mono">{{ task.total_comments or 0 }} {{ _("comments") }}</span>
           <div class="flex-gap">
-            <a href="/tasks/{{ task.id }}" class="btn btn-secondary" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;">{{ _("detail") }}</a>
-            {% if task.status == 'completed' and task.output_path %}
-            <a href="/tasks/{{ task.id }}/download" class="btn btn-secondary" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;">{{ _("download") }}</a>
+            <a href="/tasks/{{ task.id }}" class="btn btn-secondary" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;" title="{{ _('detail') }}">
+              <svg class="icon"><use href="#icon-eye"></use></svg>
+            </a>
+            {% if task.status == 'completed' %}
+            <form method="get" action="/tasks/{{ task.id }}/download" class="flex-gap" style="align-items: center;">
+              <div class="select-wrapper" style="min-width: 92px; max-width: 110px;">
+                <select name="format" class="select" style="height: 36px; padding: 4px 10px;">
+                  <option value="json">JSON</option>
+                  <option value="csv">CSV</option>
+                </select>
+              </div>
+              <button type="submit" class="btn btn-secondary" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;">
+                <svg class="icon"><use href="#icon-download"></use></svg>
+              </button>
+            </form>
+            {% endif %}
+            {% if task.status != 'running' %}
+            <form method="post" action="/tasks/{{ task.id }}/sync?page={{ page }}{% if query %}&q={{ query|urlencode }}{% endif %}">
+              <button type="submit" class="btn btn-secondary" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;">
+                <svg class="icon"><use href="#icon-repeat"></use></svg>
+              </button>
+            </form>
             {% endif %}
             {% if task.status == 'failed' %}
             <form method="post" action="/tasks/{{ task.id }}/retry">
-              <button type="submit" class="btn btn-danger-soft" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;">{{ _("retry") }}</button>
+              <button type="submit" class="btn btn-danger-soft" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;">
+                <svg class="icon"><use href="#icon-rotate"></use></svg>
+              </button>
             </form>
             {% endif %}
             <form method="post" action="/tasks/{{ task.id }}/delete?page={{ page }}{% if query %}&q={{ query|urlencode }}{% endif %}">
-              <button type="submit" class="btn btn-danger-soft" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;">{{ _("delete") }}</button>
+              <button type="submit" class="btn btn-danger-soft" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;" title="{{ _('delete') }}">
+                <svg class="icon"><use href="#icon-trash"></use></svg>
+              </button>
             </form>
           </div>
         </div>

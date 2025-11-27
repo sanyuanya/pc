@@ -9,14 +9,23 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from json import JSONDecodeError
 
 from playwright.async_api import BrowserContext, Page, Request, Route, async_playwright
 
-USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
+DEFAULT_USER_AGENTS = [
+    # Realistic desktop Chrome UAs; keep recent to avoid “headless”/old-version detection
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.76 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.207 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.60 Safari/537.36",
+]
+
+
+def choose_user_agent(custom: Optional[str] = None) -> str:
+    if custom:
+        return custom.strip()
+    return DEFAULT_USER_AGENTS[0]
 COMMENTS_API = "https://api.bilibili.com/x/v2/reply"
 SUB_COMMENTS_API = "https://api.bilibili.com/x/v2/reply/reply"
 VIEW_API = "https://api.bilibili.com/x/web-interface/view"
@@ -115,7 +124,15 @@ async def _request_with_retry(
     last_error: Optional[Dict] = None
     for attempt in range(1, retries + 1):
         resp = await context.request.get(url, params=params, headers=headers)
-        data = await resp.json()
+        if resp.status == 412:
+            raise RuntimeError("接口返回 412，可能 UA/Cookie 不匹配或被风控，请检查登录态和 User-Agent")
+        try:
+            data = await resp.json()
+        except JSONDecodeError:
+            # API occasionally returns empty body or HTML; retry in those cases
+            last_error = {"error": "invalid_json", "status": resp.status}
+            await asyncio.sleep(backoff * attempt)
+            continue
         if data.get("code") == 0:
             return data
         last_error = data
@@ -172,18 +189,27 @@ async def fetch_all_comments(
     max_duration: Optional[int] = None,
     page_size: int = 20,
     delay: float = 0.4,
+    title: Optional[str] = None,
+    existing_comments: Optional[List[Dict[str, object]]] = None,
+    existing_seen: Optional[Set[str]] = None,
+    user_agent: Optional[str] = None,
+    batch_handler: Optional[
+        Callable[[List[Dict[str, object]], str, str, Optional[str]], Awaitable[None]]
+    ] = None,
 ) -> Tuple[List[Dict[str, object]], Dict[str, int]]:
     safe_size = max(1, min(page_size, 49))  # 接口限制 ps<=49，避免报 ps out of bounds
-    base_params = {"type": 1, "oid": aid, "sort": 2, "ps": safe_size}
-    headers = {"Referer": f"https://www.bilibili.com/video/{bvid}/", "User-Agent": USER_AGENT}
-    seen: Set[str] = set()
-    comments: List[Dict[str, object]] = []
+    base_params = {"type": 1, "oid": aid, "sort": 0, "ps": safe_size}  # sort=0 按时间
+    ua = choose_user_agent(user_agent)
+    headers = {"Referer": f"https://www.bilibili.com/video/{bvid}/", "User-Agent": ua}
+    seen: Set[str] = set(existing_seen or [])
+    comments: List[Dict[str, object]] = list(existing_comments or [])
     started = time.monotonic()
     stats = {"main_pages": 0, "sub_pages": 0}
     reported_total: Optional[int] = None
     current_page = 1
 
     while True:
+        page_batch: List[Dict[str, object]] = []
         # 这里循环翻页直到接口没有更多评论
         if max_duration and time.monotonic() - started >= max_duration:
             print("[WARN] 达到用户设置的时间上限，可能仍有评论未抓取")
@@ -204,12 +230,14 @@ async def fetch_all_comments(
             if item["comment_id"] and item["comment_id"] not in seen:
                 seen.add(item["comment_id"])
                 comments.append(item)
+                page_batch.append(item)
             # 先收集接口自带的部分子评论
             for child in reply.get("replies") or []:
                 child_item = build_comment(child, parent_id=item["comment_id"])
                 if child_item["comment_id"] and child_item["comment_id"] not in seen:
                     seen.add(child_item["comment_id"])
                     comments.append(child_item)
+                    page_batch.append(child_item)
             # 若接口提示还有更多子回复，则继续翻页直到到底
             loaded_children = len(reply.get("replies") or [])
             if reply.get("rcount", 0) > loaded_children:
@@ -226,8 +254,14 @@ async def fetch_all_comments(
                 if sub_pages:
                     stats["sub_pages"] += sub_pages
                 comments.extend(extra)
+                page_batch.extend(extra)
         if cursor.get("is_end"):
             break
+        if batch_handler and page_batch:
+            try:
+                await batch_handler(page_batch, aid, bvid, title)
+            except Exception as exc:  # pragma: no cover - external handler errors
+                print(f"[WARN] 批量写入失败: {exc}")
         # 这里根据 cursor 请求下一页主楼
         current_page = cursor.get("next") or (current_page + 1)
         await asyncio.sleep(delay)
@@ -275,7 +309,7 @@ class ScrapeResult:
     comments: List[Dict[str, object]]
     aid: str
     bvid: str
-    output_path: Path
+    output_path: Optional[Path]
     title: Optional[str] = None
     main_pages: int = 0
     sub_pages: int = 0
@@ -288,13 +322,22 @@ async def scrape(
     *,
     max_duration: Optional[int] = None,
     storage_state: Optional[Path] = None,
+    batch_handler: Optional[
+        Callable[[List[Dict[str, object]], str, str, Optional[str]], Awaitable[None]]
+    ] = None,
+    metadata_handler: Optional[Callable[[str, str, Optional[str]], Awaitable[None]]] = None,
+    existing_comments: Optional[List[Dict[str, object]]] = None,
+    existing_seen: Optional[Set[str]] = None,
+    user_agent: Optional[str] = None,
+    persist_file: bool = True,
 ) -> ScrapeResult:
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True, args=["--disable-blink-features=AutomationControlled"]
         )
+        ua = choose_user_agent(user_agent)
         context_kwargs = {
-            "user_agent": USER_AGENT,
+            "user_agent": ua,
             "viewport": {"width": 1280, "height": 720},
             "java_script_enabled": True,
         }
@@ -308,11 +351,28 @@ async def scrape(
         await page.wait_for_selector("#commentapp", timeout=60000)
 
         aid, bvid, title = await resolve_ids(page, context, video_url)
+        if metadata_handler:
+            try:
+                await metadata_handler(aid, bvid, title)
+            except Exception as exc:  # pragma: no cover - external handler errors
+                print(f"[WARN] metadata handler failed: {exc}")
         print(f"[INFO] 解析成功: aid={aid}, bvid={bvid}")
-        comments, stats = await fetch_all_comments(context, aid, bvid, max_duration=max_duration)
+        comments, stats = await fetch_all_comments(
+            context,
+            aid,
+            bvid,
+            max_duration=max_duration,
+            title=title,
+            existing_comments=existing_comments,
+            existing_seen=existing_seen,
+            user_agent=user_agent,
+            batch_handler=batch_handler,
+        )
         await browser.close()
 
-    write_output(comments, output_path, bvid)
+    persisted_path: Optional[Path] = None
+    if persist_file:
+        persisted_path = write_output(comments, output_path, bvid)
     print(
         "[INTEGRITY] 本次抓取共 "
         f"{len(comments)} 条，主楼翻页 {stats.get('main_pages', 0)} 次，子楼翻页 {stats.get('sub_pages', 0)} 次，"
@@ -322,7 +382,7 @@ async def scrape(
         comments=comments,
         aid=aid,
         bvid=bvid,
-        output_path=output_path,
+        output_path=persisted_path,
         title=title,
         main_pages=stats.get("main_pages", 0),
         sub_pages=stats.get("sub_pages", 0),

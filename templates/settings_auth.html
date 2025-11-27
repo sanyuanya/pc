@@ -26,6 +26,9 @@
       {% if cleared %}
       <div class="alert alert-success">{{ _("settings_auth_cleared") }}</div>
       {% endif %}
+      {% if removed %}
+      <div class="alert alert-success">{{ _("settings_auth_cleared") }}</div>
+      {% endif %}
       {% if error_message %}
       <div class="alert alert-error">{{ error_message }}</div>
       {% endif %}
@@ -38,8 +41,8 @@
               <div class="step-content">
                 {{ _("settings_auth_step1_text") }}
                 <div style="position: relative; margin-top: 0.5rem;">
-                  <code class="code-snippet" style="padding-right: 2.5rem;">playwright open --save-storage {{ storage_state_path }} https://www.bilibili.com</code>
-                  <button type="button" data-copy="playwright open --save-storage {{ storage_state_path }} https://www.bilibili.com" style="position: absolute; right: 0.5rem; top: 50%; transform: translateY(-50%); border: none; background: transparent; color: var(--text-tertiary); cursor: pointer; padding: 4px; display: flex; align-items: center; justify-content: center;" title="{{ _('copy') }}">
+                  <code class="code-snippet" style="padding-right: 2.5rem;">playwright open --save-storage state.json https://www.bilibili.com</code>
+                  <button type="button" data-copy="playwright open --save-storage state.json https://www.bilibili.com" style="position: absolute; right: 0.5rem; top: 50%; transform: translateY(-50%); border: none; background: transparent; color: var(--text-tertiary); cursor: pointer; padding: 4px; display: flex; align-items: center; justify-content: center;" title="{{ _('copy') }}">
                     <svg class="icon" style="width: 14px; height: 14px;"><use href="#icon-copy"></use></svg>
                   </button>
                 </div>
@@ -62,23 +65,42 @@
 
         <div>
           <form method="post" action="/settings/auth/upload" enctype="multipart/form-data">
-            <div class="upload-zone" onclick="document.getElementById('file-upload').click()">
+            <div class="upload-zone" style="position: relative; overflow: hidden;">
               <div class="upload-icon">
                 <svg class="icon" style="width: 48px; height: 48px; opacity: 0.4;"><use href="#icon-upload"></use></svg>
               </div>
-              <div class="upload-hint">{{ _("settings_auth_select") }}</div>
+              <div class="upload-hint" id="upload-filename">{{ _("settings_auth_select") }}</div>
               <div class="upload-sub">Drag & drop or click to browse</div>
-              <input id="file-upload" type="file" name="state_file" accept="application/json,.json" onchange="this.parentElement.querySelector('.upload-hint').textContent = this.files[0].name" required />
+              <input
+                id="file-upload"
+                type="file"
+                name="state_file"
+                multiple
+                accept="application/json,.json"
+                required
+                style="position: absolute; inset: 0; opacity: 0; cursor: pointer;"
+                onchange="document.getElementById('upload-filename').textContent = this.files.length ? Array.from(this.files).map(f => f.name).join(', ') : '{{ _('settings_auth_select') }}';"
+              />
             </div>
             
             <button class="btn btn-primary" type="submit" style="width: 100%; margin-top: 1rem;">
               {{ _("settings_auth_upload") }}
             </button>
           </form>
-          {% if has_auth %}
-          <form method="post" action="/settings/auth/clear" style="margin-top: 0.5rem;">
-            <button type="submit" class="btn btn-danger-soft" style="width: 100%;">{{ _("settings_auth_clear") }}</button>
-          </form>
+          {% if auth_states %}
+          <div style="margin-top: 0.75rem;">
+            <div class="text-sm text-muted" style="margin-bottom: 0.35rem;">{{ _("auth_saved") }}</div>
+            <div style="display: flex; flex-direction: column; gap: 0.35rem;">
+              {% for label, path in auth_states %}
+              <form method="post" action="/settings/auth/delete" class="flex-gap" style="align-items: center; gap: 0.5rem;">
+                <input type="text" name="label" value="{{ label }}" class="input" style="flex: 1;" />
+                <button type="submit" class="btn btn-danger-soft" style="padding: 0.25rem 0.6rem;">
+                  <svg class="icon"><use href="#icon-trash"></use></svg>
+                </button>
+              </form>
+              {% endfor %}
+            </div>
+          </div>
           {% endif %}
           
           <div style="margin-top: 1rem; text-align: center; font-size: 0.8rem; color: var(--text-tertiary);">
@@ -86,6 +108,45 @@
           </div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h2 class="card-title">User-Agent</h2>
+    </div>
+    <div class="card-body">
+      <form method="post" action="/settings/ua" class="flex-gap" style="align-items: center; flex-wrap: wrap;">
+        <input type="text" name="label" class="input" placeholder="{{ _('ua_label') }}" style="width: 160px;" required>
+        <input type="text" name="ua" class="input" placeholder="{{ _('ua_placeholder') }}" style="flex: 1; min-width: 240px;" required>
+        <button type="submit" class="btn btn-primary">{{ _('ua_save') }}</button>
+      </form>
+      {% if ua_list %}
+      <div style="margin-top: 1rem; display: flex; flex-direction: column; gap: 0.35rem;">
+        {% for label, ua in ua_list %}
+        <form method="post" action="/settings/ua/delete" style="display: flex; align-items: center; gap: 0.5rem;">
+          <div style="flex: 1;">
+            <div class="text-sm" style="font-weight: 600;">{{ label }}</div>
+            <div class="text-xs text-muted" style="word-break: break-all;">{{ ua }}</div>
+          </div>
+          <button type="submit" name="label" value="{{ label }}" class="btn btn-danger-soft" style="padding: 0.25rem 0.6rem;">
+            <svg class="icon" style="width: 14px; height: 14px;"><use href="#icon-trash"></use></svg>
+          </button>
+        </form>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% if default_uas %}
+      <div style="margin-top: 0.75rem;">
+        <div class="text-sm text-muted" style="margin-bottom: 0.35rem;">{{ _("ua_builtin") }}</div>
+        <div style="display: flex; flex-direction: column; gap: 0.3rem;">
+          {% for ua in default_uas %}
+          <div class="text-xs text-muted" style="word-break: break-all;">{{ ua }}</div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+      <p class="text-muted text-sm" style="margin-top: 0.75rem;">{{ _("ua_hint") }}</p>
     </div>
   </div>
 </div>

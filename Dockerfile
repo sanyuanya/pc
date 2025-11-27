@@ -22,4 +22,4 @@ RUN python -m pip install --upgrade pip && \
 EXPOSE 8000
 VOLUME ["/data"]
 
-CMD ["python", "main.py", "--serve", "--host", "0.0.0.0", "--port", "8000", "--data-dir", "/data"]
+CMD ["uv", "run", "main.py", "--serve", "--host", "0.0.0.0", "--port", "8000", "--data-dir", "/data"]

@@ -40,15 +40,15 @@ jobs:
 
   docker:
     needs: test
-    if: ${{ github.event_name == 'push'
-      && github.ref == 'refs/heads/main'
-      && secrets.DOCKERHUB_USERNAME != ''
-      && secrets.DOCKERHUB_TOKEN != ''
-      && secrets.DOCKERHUB_REPO != ''
-      && secrets.GHCR_USERNAME != ''
-      && secrets.GHCR_TOKEN != ''
-      && secrets.GHCR_REPO != '' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_REPO }}
+      GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+      GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+      GHCR_REPO: ${{ secrets.GHCR_REPO }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,24 +58,27 @@ jobs:
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_REPO != '' }}
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
+        if: ${{ env.GHCR_USERNAME != '' && env.GHCR_TOKEN != '' && env.GHCR_REPO != '' }}
         with:
           registry: ghcr.io
-          username: ${{ secrets.GHCR_USERNAME }}
-          password: ${{ secrets.GHCR_TOKEN }}
+          username: ${{ env.GHCR_USERNAME }}
+          password: ${{ env.GHCR_TOKEN }}
 
       - name: Build and push image
         uses: docker/bake-action@v5
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_REPO != '' && env.GHCR_USERNAME != '' && env.GHCR_TOKEN != '' && env.GHCR_REPO != '' }}
         with:
           files: docker-bake.hcl
           push: true
           set: |
-            pc.tags=${{ secrets.DOCKERHUB_REPO }}:latest
-            pc.tags+=${{ secrets.DOCKERHUB_REPO }}:${{ github.sha }}
-            pc.tags+=ghcr.io/${{ secrets.GHCR_REPO }}:latest
-            pc.tags+=ghcr.io/${{ secrets.GHCR_REPO }}:${{ github.sha }}
+            pc.tags=${{ env.DOCKERHUB_REPO }}:latest
+            pc.tags+=${{ env.DOCKERHUB_REPO }}:${{ github.sha }}
+            pc.tags+=ghcr.io/${{ env.GHCR_REPO }}:latest
+            pc.tags+=ghcr.io/${{ env.GHCR_REPO }}:${{ github.sha }}

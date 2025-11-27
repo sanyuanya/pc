@@ -84,6 +84,13 @@ docker buildx bake pc \
   --set pc.tags=yourname/pc:latest \
   --set pc.tags+=yourname/pc:$(git rev-parse --short HEAD) \
   --push
+
+# 推送到 Docker Hub / GHCR
+docker build -t yourname/pc:latest .
+docker push yourname/pc:latest
+# GitHub Container Registry
+docker build -t ghcr.io/<org或用户名>/pc:latest .
+docker push ghcr.io/<org或用户名>/pc:latest
 ```
 
 #### GitHub Actions 推送镜像

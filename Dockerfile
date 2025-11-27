@@ -1,25 +1,37 @@
+FROM ghcr.io/astral-sh/uv:0.9.13 AS uv
+
+# Install Python dependencies into a reusable layer.
+FROM mcr.microsoft.com/playwright/python:v1.45.1-jammy AS builder
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_NO_INSTALLER_METADATA=1 \
+    UV_LINK_MODE=copy
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+
+RUN --mount=from=uv,source=/uv,target=/bin/uv \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv export --frozen --no-emit-workspace --no-dev --no-editable -o /tmp/requirements.txt && \
+    uv pip install -r /tmp/requirements.txt --target /opt/python
+
+# Runtime image with Playwright + project code.
 FROM mcr.microsoft.com/playwright/python:v1.45.1-jammy
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
-    APP_MAX_WORKERS=2
+    APP_MAX_WORKERS=2 \
+    PYTHONPATH="/opt/python:${PYTHONPATH}" \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 WORKDIR /app
 
-COPY pyproject.toml README.md uv.lock pylock.toml ./
-COPY pc ./pc
-COPY static ./static
-COPY templates ./templates
-COPY main.py ./
-
-RUN python -m pip install --upgrade pip && \
-    pip install --no-cache-dir uv && \
-    uv pip sync --system uv.lock && \
-    uv pip install --system -e . && \
-    python -m playwright install chromium
+COPY --from=builder /opt/python /opt/python
+COPY . /app
 
 EXPOSE 8000
 VOLUME ["/data"]
 
-CMD ["uv", "run", "main.py", "--serve", "--host", "0.0.0.0", "--port", "8000", "--data-dir", "/data"]
+CMD ["uvicorn", "pc.web:app", "--host", "0.0.0.0", "--port", "8000"]

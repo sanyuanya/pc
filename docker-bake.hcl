@@ -1,5 +1,5 @@
-variable "IMAGE_REPO" {
-  default = "sanyuanya/pc"
+group "default" {
+  targets = ["pc"]
 }
 
 target "pc" {
@@ -8,3 +8,4 @@ target "pc" {
   platforms  = ["linux/amd64", "linux/arm64"]
   tags       = ["${IMAGE_REPO}:latest"]
 }
+

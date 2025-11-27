@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}{{ _("login_title") }}{% endblock %}
+
+{% block content %}
+<div class="auth-wrapper">
+  <div class="auth-card">
+    <div class="auth-header">
+      <div style="display:inline-flex; align-items:center; justify-content:center; width:48px; height:48px; border-radius:12px; background:rgba(59,130,246,0.1); color:var(--brand-primary); margin-bottom:1rem;">
+        <svg class="icon" style="width:24px;height:24px;"><use href="#icon-lang"></use></svg>
+      </div>
+      <h2>{{ _("login_title") }}</h2>
+      <p class="text-muted">{{ _("login_desc") }}</p>
+    </div>
+
+    {% if error %}
+    <div class="alert alert-error" style="margin-bottom: 1.5rem;">{{ error }}</div>
+    {% endif %}
+
+    <form method="post" action="/login">
+      <div class="form-group">
+        <label class="text-sm text-muted" style="display:block; margin-bottom:0.4rem">{{ _("login_username") }}</label>
+        <input type="text" name="username" class="input" placeholder="{{ _('login_username_placeholder') }}" required />
+      </div>
+      <div class="form-group">
+        <label class="text-sm text-muted" style="display:block; margin-bottom:0.4rem">{{ _("login_password") }}</label>
+        <input type="password" name="password" class="input" placeholder="{{ _('login_password_placeholder') }}" required />
+      </div>
+      <input type="hidden" name="next" value="{{ next or '/' }}" />
+      
+      <button class="btn btn-primary" type="submit" style="width: 100%; margin-top: 1rem; padding: 0.75rem;">
+        {{ _("login_submit") }}
+      </button>
+    </form>
+
+    <div class="auth-footer">
+      {{ _("login_notice") }}
+    </div>
+  </div>
+</div>
+{% endblock %}

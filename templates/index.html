@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="grid-main">
+  <!-- 左侧：添加任务 -->
+  <section class="card">
+    <div class="card-header">
+      <h2 class="card-title">{{ _("new_task") }}</h2>
+    </div>
+    <div class="card-body">
+      {% if created %}<div class="alert alert-success">{{ _("task_created", count=created) }}</div>{% endif %}
+      {% if failed %}<div class="alert alert-error">{{ _("link_error", count=failed) }}</div>{% endif %}
+      {% if form_errors %}
+      <div class="alert alert-error">
+        {% for err in form_errors %}<div>{{ err }}</div>{% endfor %}
+      </div>
+      {% endif %}
+
+      <form method="post" action="/tasks">
+        <div class="form-group">
+          <textarea 
+            name="links" 
+            rows="4" 
+            class="textarea font-mono text-sm" 
+            placeholder="{{ _('paste_placeholder') }}" 
+            required
+          ></textarea>
+        </div>
+        <div class="form-group">
+          <label class="text-sm text-muted" style="display:block; margin-bottom:0.4rem">{{ _("export_format") }}</label>
+          <div class="select-wrapper">
+            <select name="export_format" class="select">
+              <option value="json">JSON</option>
+              <option value="csv">CSV</option>
+            </select>
+          </div>
+        </div>
+        <button type="submit" class="btn btn-primary" style="width: 100%;">
+          <svg class="icon"><use href="#icon-copy"></use></svg>
+          {{ _("submit_task") }}
+        </button>
+      </form>
+    </div>
+  </section>
+
+  <!-- 右侧：状态 -->
+  <section class="card" style="height: fit-content;">
+    <div class="card-header">
+      <h2 class="card-title">{{ _("status") }}</h2>
+    </div>
+    <div class="card-body">
+      <div style="display: flex; justify-content: space-between; margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border-color);">
+        <span class="text-secondary">{{ _("system_worker") }}</span>
+        <span class="badge status-done"><span class="badge-dot"></span>{{ _("online") }}</span>
+      </div>
+      <div style="display: flex; justify-content: space-between;">
+        <span class="text-secondary">{{ _("auth_state") }}</span>
+        {% if has_auth %}
+        <span class="badge status-done">{{ _("logged_in") }}</span>
+        {% else %}
+        <span class="badge status-wait">{{ _("guest") }}</span>
+        {% endif %}
+      </div>
+      <p class="text-muted text-sm" style="margin-top: 1rem;">
+        {% if has_auth %}
+        {{ _("auth_tip_logged_in") }}
+        {% else %}
+        {{ _("auth_tip_guest") }}
+        <a href="/settings/auth" class="text-link">{{ _("auth_tip_upload") }}</a>
+        {% endif %}
+      </p>
+    </div>
+  </section>
+</div>
+
+<!-- 任务列表 -->
+<div style="margin-top: 3rem;">
+  <div class="list-controls">
+    <h2 style="margin: 0; font-size: 1.25rem;">{{ _("tasks_list") }}</h2>
+    <form method="get" class="search-box">
+      <svg><use href="#icon-search"></use></svg>
+      <input type="text" name="q" value="{{ query }}" class="input" placeholder="{{ _('search_placeholder') }}" autocomplete="off">
+    </form>
+  </div>
+
+  <div class="task-list">
+    <!-- PC Table View -->
+    <table class="table-view">
+      <thead>
+        <tr>
+          <th style="width: 45%;">{{ _("video") }}</th>
+          <th style="width: 15%;">{{ _("status_col") }}</th>
+          <th style="width: 15%;">{{ _("comments") }}</th>
+          <th style="width: 25%; text-align: right;">{{ _("actions") }}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for task in tasks %}
+        <tr>
+          <td>
+            <div style="font-weight: 600; margin-bottom: 0.25rem;" title="{{ task.title }}">
+              {{ task.title or _("parsing") }}
+            </div>
+            <div class="flex-gap text-sm text-muted">
+          <span class="truncate font-mono">{{ task.normalized_url }}</span>
+              <button class="btn btn-secondary" style="padding: 2px 6px; height: 24px;" data-copy="{{ task.normalized_url }}" title="{{ _('copy') }}">
+                <svg class="icon" style="width: 14px; height: 14px;"><use href="#icon-copy"></use></svg>
+              </button>
+            </div>
+          </td>
+          <td>
+            {% if task.status == 'completed' %}
+              <span class="badge status-done"><span class="badge-dot"></span>{{ _("status_done") }}</span>
+            {% elif task.status == 'running' %}
+              <span class="badge status-run"><span class="badge-dot"></span>{{ _("status_running") }}</span>
+            {% elif task.status == 'failed' %}
+              <span class="badge status-fail"><span class="badge-dot"></span>{{ _("status_failed") }}</span>
+            {% else %}
+              <span class="badge status-wait"><span class="badge-dot"></span>{{ _("status_pending") }}</span>
+            {% endif %}
+          </td>
+          <td class="font-mono text-sm">
+            {{ task.total_comments if task.total_comments is not none else '-' }}
+          </td>
+          <td style="text-align: right;">
+            <div style="display: flex; justify-content: flex-end; gap: 0.5rem;">
+              <a href="/tasks/{{ task.id }}" class="btn btn-secondary" style="padding: 0.4rem;" title="{{ _('detail') }}">
+                <svg class="icon"><use href="#icon-eye"></use></svg>
+              </a>
+              {% if task.status == 'completed' and task.output_path %}
+              <a href="/tasks/{{ task.id }}/download" class="btn btn-secondary" style="padding: 0.4rem;" title="{{ _('download') }}">
+                <svg class="icon"><use href="#icon-download"></use></svg>
+              </a>
+              {% endif %}
+              {% if task.status == 'failed' %}
+              <form method="post" action="/tasks/{{ task.id }}/retry" style="display: inline;">
+                <button type="submit" class="btn btn-danger-soft" style="padding: 0.4rem;" title="{{ _('retry') }}">
+                   <svg class="icon"><use href="#icon-refresh"></use></svg>
+                </button>
+              </form>
+              {% endif %}
+              <form method="post" action="/tasks/{{ task.id }}/delete?page={{ page }}{% if query %}&q={{ query|urlencode }}{% endif %}" style="display: inline;">
+                <button type="submit" class="btn btn-danger-soft" style="padding: 0.4rem;" title="{{ _('delete') }}">
+                   <svg class="icon"><use href="#icon-trash"></use></svg>
+                </button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="4" style="text-align: center; padding: 3rem; color: var(--text-muted);">
+            {{ _("no_preview") }}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <!-- Mobile List View -->
+    <div class="mobile-view">
+      {% for task in tasks %}
+      <div class="mobile-item">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.5rem;">
+          <strong style="font-size: 1rem; line-height: 1.4; margin-right: 1rem;">{{ task.title or _("parsing") }}</strong>
+          {% if task.status == 'completed' %}
+            <span class="badge status-done">{{ _("status_done") }}</span>
+          {% elif task.status == 'running' %}
+            <span class="badge status-run">{{ _("status_running") }}</span>
+          {% elif task.status == 'failed' %}
+            <span class="badge status-fail">{{ _("status_failed") }}</span>
+          {% else %}
+            <span class="badge status-wait">{{ _("status_pending") }}</span>
+          {% endif %}
+        </div>
+        <div class="flex-gap text-sm text-muted" style="margin-bottom: 1rem;">
+          <span class="truncate font-mono" style="flex: 1; min-width: 0;">{{ task.normalized_url }}</span>
+          <button class="btn btn-secondary" style="padding: 2px 6px; height: 24px; flex-shrink: 0;" data-copy="{{ task.normalized_url }}" title="{{ _('copy') }}">
+            <svg class="icon" style="width: 14px; height: 14px;"><use href="#icon-copy"></use></svg>
+          </button>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+          <span class="text-sm font-mono">{{ task.total_comments or 0 }} {{ _("comments") }}</span>
+          <div class="flex-gap">
+            <a href="/tasks/{{ task.id }}" class="btn btn-secondary" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;">{{ _("detail") }}</a>
+            {% if task.status == 'completed' and task.output_path %}
+            <a href="/tasks/{{ task.id }}/download" class="btn btn-secondary" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;">{{ _("download") }}</a>
+            {% endif %}
+            {% if task.status == 'failed' %}
+            <form method="post" action="/tasks/{{ task.id }}/retry">
+              <button type="submit" class="btn btn-danger-soft" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;">{{ _("retry") }}</button>
+            </form>
+            {% endif %}
+            <form method="post" action="/tasks/{{ task.id }}/delete?page={{ page }}{% if query %}&q={{ query|urlencode }}{% endif %}">
+              <button type="submit" class="btn btn-danger-soft" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;">{{ _("delete") }}</button>
+            </form>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- Pagination -->
+  {% if total_pages > 1 %}
+  <div style="margin-top: 2rem; display: flex; justify-content: center; gap: 1rem;">
+    {% if page > 1 %}
+    <a href="/?page={{ page - 1 }}&q={{ query }}" class="btn btn-secondary">{{ _("prev") }}</a>
+    {% endif %}
+    <span style="display: flex; align-items: center; font-size: 0.9rem;" class="text-muted">{{ _("page_info", page=page, total=total_pages) }}</span>
+    {% if page < total_pages %}
+    <a href="/?page={{ page + 1 }}&q={{ query }}" class="btn btn-secondary">{{ _("next") }}</a>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,13 @@
+services:
+  pc:
+    build:
+      context: .
+    image: pc-local:latest
+    ports:
+      - "8000:8000"
+    environment:
+      APP_SESSION_SECRET: "change-me"
+      APP_MAX_WORKERS: "2"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

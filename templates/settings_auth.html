@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}{{ _("settings_auth_title") }}{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 2rem;">
+  <a href="/" class="btn btn-secondary" style="display: inline-flex; margin-bottom: 1rem;">
+    <svg class="icon" style="transform: rotate(180deg);"><use href="#icon-external"></use></svg>
+    {{ _("back_to_list") }}
+  </a>
+</div>
+
+<div class="grid-main">
+  <div class="card">
+    <div class="card-header">
+      <h2 class="card-title">{{ _("settings_auth_title") }}</h2>
+      {% if has_auth %}
+      <span class="badge status-done">{{ _("logged_in") }}</span>
+      {% else %}
+      <span class="badge status-wait">{{ _("guest") }}</span>
+      {% endif %}
+    </div>
+    <div class="card-body">
+      {% if uploaded %}
+      <div class="alert alert-success">{{ _("settings_auth_success") }}</div>
+      {% endif %}
+      {% if cleared %}
+      <div class="alert alert-success">{{ _("settings_auth_cleared") }}</div>
+      {% endif %}
+      {% if error_message %}
+      <div class="alert alert-error">{{ error_message }}</div>
+      {% endif %}
+
+      <div style="display: grid; grid-template-columns: 1fr; gap: 2rem; align-items: start;">
+        <div>
+          <ul class="step-list">
+            <li class="step-item">
+              <span class="step-num">1</span>
+              <div class="step-content">
+                {{ _("settings_auth_step1_text") }}
+                <div style="position: relative; margin-top: 0.5rem;">
+                  <code class="code-snippet" style="padding-right: 2.5rem;">playwright open --save-storage {{ storage_state_path }} https://www.bilibili.com</code>
+                  <button type="button" data-copy="playwright open --save-storage {{ storage_state_path }} https://www.bilibili.com" style="position: absolute; right: 0.5rem; top: 50%; transform: translateY(-50%); border: none; background: transparent; color: var(--text-tertiary); cursor: pointer; padding: 4px; display: flex; align-items: center; justify-content: center;" title="{{ _('copy') }}">
+                    <svg class="icon" style="width: 14px; height: 14px;"><use href="#icon-copy"></use></svg>
+                  </button>
+                </div>
+              </div>
+            </li>
+            <li class="step-item">
+              <span class="step-num">2</span>
+              <div class="step-content">
+                {{ _("settings_auth_step2") }}
+              </div>
+            </li>
+            <li class="step-item">
+              <span class="step-num">3</span>
+              <div class="step-content">
+                {{ _("settings_auth_step3") }}
+              </div>
+            </li>
+          </ul>
+        </div>
+
+        <div>
+          <form method="post" action="/settings/auth/upload" enctype="multipart/form-data">
+            <div class="upload-zone" onclick="document.getElementById('file-upload').click()">
+              <div class="upload-icon">
+                <svg class="icon" style="width: 48px; height: 48px; opacity: 0.4;"><use href="#icon-upload"></use></svg>
+              </div>
+              <div class="upload-hint">{{ _("settings_auth_select") }}</div>
+              <div class="upload-sub">Drag & drop or click to browse</div>
+              <input id="file-upload" type="file" name="state_file" accept="application/json,.json" onchange="this.parentElement.querySelector('.upload-hint').textContent = this.files[0].name" required />
+            </div>
+            
+            <button class="btn btn-primary" type="submit" style="width: 100%; margin-top: 1rem;">
+              {{ _("settings_auth_upload") }}
+            </button>
+          </form>
+          {% if has_auth %}
+          <form method="post" action="/settings/auth/clear" style="margin-top: 0.5rem;">
+            <button type="submit" class="btn btn-danger-soft" style="width: 100%;">{{ _("settings_auth_clear") }}</button>
+          </form>
+          {% endif %}
+          
+          <div style="margin-top: 1rem; text-align: center; font-size: 0.8rem; color: var(--text-tertiary);">
+            Max Size: {{ state_limit_kb }} KB
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

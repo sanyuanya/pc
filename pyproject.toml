@@ -16,3 +16,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4"]
+
+[build-system]
+requires = ["setuptools>=67", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+include = ["pc*"]
+exclude = ["static", "templates", "tests", "data"]

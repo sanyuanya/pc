@@ -6,6 +6,7 @@ on:
   pull_request:
     branches: ["main"]
   workflow_dispatch:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -40,15 +41,14 @@ jobs:
 
   docker:
     needs: test
-    if: >
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/main' &&
-      secrets.DOCKERHUB_USERNAME != '' &&
-      secrets.DOCKERHUB_TOKEN != '' &&
-      secrets.DOCKERHUB_REPO != '' &&
-      secrets.GHCR_USERNAME != '' &&
-      secrets.GHCR_TOKEN != '' &&
-      secrets.GHCR_REPO != ''
+    if: ${{ github.event_name == 'push'
+      && github.ref == 'refs/heads/main'
+      && secrets.DOCKERHUB_USERNAME != ''
+      && secrets.DOCKERHUB_TOKEN != ''
+      && secrets.DOCKERHUB_REPO != ''
+      && secrets.GHCR_USERNAME != ''
+      && secrets.GHCR_TOKEN != ''
+      && secrets.GHCR_REPO != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

@@ -100,6 +100,9 @@ CI workflow 新增 `docker` 作业，会在推送到 `main` 分支时构建并�
 - `DOCKERHUB_USERNAME`：Docker Hub 用户名；
 - `DOCKERHUB_TOKEN`：具有推送权限的访问令牌；
 - `DOCKERHUB_REPO`：目标仓库（例如 `yourname/pc`）。
+- `GHCR_USERNAME`：GitHub 用户名或 org；
+- `GHCR_TOKEN`：具有 `write:packages` 权限的 PAT；
+- `GHCR_REPO`：GHCR 仓库名（例如 `yourname/pc`，workflow 会自动加 `ghcr.io/` 前缀）。
 
 配置完成后，CI 会自动生成 `latest` 与 `:<git-sha>` 两个 tag。
 

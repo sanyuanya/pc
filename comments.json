@@ -1,0 +1,66 @@
+{
+  "video_bvid": "BV1Ny1oBUEH5",
+  "total": 6,
+  "comments": [
+    {
+      "comment_id": "280124934865",
+      "parent_comment_id": "",
+      "user_id": "411941159",
+      "user_name": "dryggjs",
+      "content": "这播放量，rust完了吗[笑哭]",
+      "publish_time": "2025-11-09 14:11:55",
+      "like_count": 1,
+      "is_sub_reply": false
+    },
+    {
+      "comment_id": "280125264129",
+      "parent_comment_id": "280124934865",
+      "user_id": "361469957",
+      "user_name": "软件工艺师",
+      "content": "发帖时间不好",
+      "publish_time": "2025-11-09 14:15:51",
+      "like_count": 1,
+      "is_sub_reply": true
+    },
+    {
+      "comment_id": "281968658896",
+      "parent_comment_id": "280124934865",
+      "user_id": "314600624",
+      "user_name": "天锁的小刀",
+      "content": "所有语言都要有自己都应用场景，其他语言都在自己的领域很好的完成其工作，rust就很难发挥，自然没人用",
+      "publish_time": "2025-11-09 18:30:10",
+      "like_count": 0,
+      "is_sub_reply": true
+    },
+    {
+      "comment_id": "280108295169",
+      "parent_comment_id": "",
+      "user_id": "53736784",
+      "user_name": "两杯水酒",
+      "content": "老师声音好小，和其他视频比起来老师的声音都好小",
+      "publish_time": "2025-11-09 11:20:12",
+      "like_count": 1,
+      "is_sub_reply": false
+    },
+    {
+      "comment_id": "280125255729",
+      "parent_comment_id": "280108295169",
+      "user_id": "361469957",
+      "user_name": "软件工艺师",
+      "content": "其他的调整声音了，莫非这个忘记调了…",
+      "publish_time": "2025-11-09 14:15:34",
+      "like_count": 0,
+      "is_sub_reply": true
+    },
+    {
+      "comment_id": "281987296640",
+      "parent_comment_id": "",
+      "user_id": "390506825",
+      "user_name": "油门落选淦君",
+      "content": "老师手速惊人",
+      "publish_time": "2025-11-09 21:26:09",
+      "like_count": 0,
+      "is_sub_reply": false
+    }
+  ]
+}

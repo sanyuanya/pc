@@ -6,13 +6,14 @@ import csv
 import json
 import math
 import os
+import random
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Set
 from urllib.parse import quote, urlencode
 from uuid import uuid4
 
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile, File, Response
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -20,9 +21,10 @@ from starlette.middleware.sessions import SessionMiddleware
 from datetime import datetime
 
 from pc.postgres import DEFAULT_TABLE, PostgresSink
-from pc.scraper import normalize_video_url, scrape, extract_bvid, DEFAULT_USER_AGENTS
+from pc.scraper import normalize_video_url, scrape, extract_bvid, DEFAULT_USER_AGENTS, MaxOffsetExceededError
 from pc.storage import TaskRecord, TaskStore, UserRecord
 from pc.i18n import get_trans
+from pc.raffle import run_raffle
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 TEMPLATES_DIR = ROOT_DIR / "templates"
@@ -44,6 +46,12 @@ class TaskManager:
         self.data_dir = data_dir
         self.exports_dir = self.data_dir / "exports"
         self.exports_dir.mkdir(parents=True, exist_ok=True)
+        self.logs_dir = self.data_dir / "logs"
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.wordcloud_dir = self.data_dir / "wordclouds"
+        self.wordcloud_dir.mkdir(parents=True, exist_ok=True)
+        self.resume_dir = self.data_dir / "resume"
+        self.resume_dir.mkdir(parents=True, exist_ok=True)
         self.queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
         self.workers: List[asyncio.Task[None]] = []
         self.max_workers = max(1, max_workers)
@@ -54,6 +62,18 @@ class TaskManager:
         self.ua_cycle: List[str] = []
         if self.user_agent:
             self.ua_cycle.append(self.user_agent)
+        self.retry_state: dict[str, int] = {}
+        self.max_auto_retry = max(0, int(os.environ.get("APP_AUTO_RETRY", "1")))
+        self.wordcloud_font = os.environ.get("APP_WORDCLOUD_FONT")
+
+    def _log(self, task_id: str, message: str) -> None:
+        timestamp = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
+        log_line = f"[{timestamp}] {message}\n"
+        log_path = self.logs_dir / f"{task_id}.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(log_line)
+        print(f"[TASK {task_id[:8]}] {message}")
 
     async def start(self) -> None:
         if self.workers:
@@ -90,6 +110,56 @@ class TaskManager:
         root = self.get_storage_state_path(user_id)
         return root / f"{label or 'default'}.json"
 
+    def _resume_path(self, task_id: str) -> Path:
+        return self.resume_dir / f"{task_id}.json"
+
+    def _load_resume_state(self, task_id: str) -> dict:
+        path = self._resume_path(task_id)
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _save_resume_state(self, task_id: str, state: dict) -> None:
+        path = self._resume_path(task_id)
+        path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _clear_resume_state(self, task_id: str) -> None:
+        path = self._resume_path(task_id)
+        if path.exists():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    async def _delayed_retry(self, task_id: str, delay: float) -> None:
+        self._log(task_id, f"计划在 {delay:.1f}s 后自动重试")
+        await asyncio.sleep(delay)
+        await self.enqueue(task_id)
+        self._log(task_id, "已重新入队等待下一次抓取")
+
+    async def build_wordcloud(self, task: TaskRecord, comments: List[dict], *, refresh: bool = False) -> Path:
+        from pc.wordcloud import render_wordcloud
+
+        path = self.wordcloud_dir / f"{task.id}.png"
+        need_regen = refresh or not path.exists()
+        if task.updated_at and path.exists():
+            try:
+                ref = datetime.fromisoformat(task.updated_at).timestamp()
+                need_regen = refresh or path.stat().st_mtime < ref
+            except ValueError:
+                need_regen = refresh or not path.exists()
+        if need_regen:
+            await asyncio.to_thread(
+                render_wordcloud,
+                comments,
+                output_path=path,
+                font_path=self.wordcloud_font,
+            )
+        return path
+
     async def retry_task(self, task_id: str) -> None:
         """将失败任务重新入队，复用原 task_id。"""
 
@@ -103,6 +173,8 @@ class TaskManager:
             output_path=None,
             total_comments=None,
         )
+        self.retry_state.pop(task_id, None)
+        self._log(task_id, "收到手动重试请求，重新排队")
         await self.enqueue(task_id)
 
     async def sync_task(self, task_id: str) -> None:
@@ -120,6 +192,9 @@ class TaskManager:
             output_path=None if self.pg_sink else record.output_path,
             total_comments=None,
         )
+        self.retry_state.pop(task_id, None)
+        self._clear_resume_state(task_id)
+        self._log(task_id, "收到同步请求，清理断点并重新抓取")
         await self.enqueue(task_id)
 
     async def _run(self) -> None:
@@ -139,6 +214,7 @@ class TaskManager:
             return
         suffix = ".csv" if record.export_format == "csv" else ".json"
         output_path = self.exports_dir / f"{task_id}{suffix}"
+        duration = record.timeout if record.timeout and record.timeout > 0 else None
         streaming_to_db = bool(self.pg_sink)
         self.store.update_task(
             task_id,
@@ -146,6 +222,7 @@ class TaskManager:
             error=None,
             output_path=None if self.pg_sink else record.output_path,
         )
+        self._log(task_id, f"开始抓取任务，URL={record.normalized_url}")
         # auth candidates
         auth_candidates: List[Optional[Path]] = []
         for _, path in self.store.list_auth_states(user_id=record.user_id):
@@ -156,12 +233,14 @@ class TaskManager:
         if default_state.exists() and default_state.stat().st_size > 0:
             auth_candidates.append(default_state)
         auth_candidates.append(None)
+        random.shuffle(auth_candidates)
 
         # ua candidates
         ua_candidates: List[str] = []
         for ua in [self.user_agent] + [ua for _, ua in self.store.list_user_agents(user_id=record.user_id)] + list(DEFAULT_USER_AGENTS):
             if ua and ua not in ua_candidates:
                 ua_candidates.append(ua)
+        random.shuffle(ua_candidates)
 
         # preload existing
         base_existing_comments: List[dict] = []
@@ -205,70 +284,128 @@ class TaskManager:
             if success:
                 break
             for auth_state in auth_candidates:
-                buffer: list[dict] = []
-                BATCH_SIZE = 200
-                self.partial_comments[task_id] = []
+                resume_reset = False
+                auth_label = auth_state.name if isinstance(auth_state, Path) else ("default" if auth_state else "anonymous")
+                self._log(task_id, f"使用 UA={ua[:60]}..., 登录态={auth_label or 'none'}")
+                while True:
+                    buffer: list[dict] = []
+                    BATCH_SIZE = 200
+                    self.partial_comments[task_id] = []
 
-                async def flush_buffer(aid: str, bvid: str, title: Optional[str]) -> None:
-                    if not self.pg_sink or not buffer:
-                        return
-                    try:
-                        await self.pg_sink.save_comments(buffer, bvid=bvid, aid=aid, title=title)
-                        buffer.clear()
-                    except Exception as exc:  # pragma: no cover - external service
-                        print(f"[WARN] 批量写入 Postgres 失败: {exc}")
-
-                async def batch_handler(chunk, aid, bvid, title):
-                    if not self.pg_sink:
-                        return
-                    buffer.extend(chunk)
-                    if len(buffer) >= BATCH_SIZE:
-                        await flush_buffer(aid, bvid, title)
-                    cache = self.partial_comments.get(task_id, [])
-                    cache.extend(chunk)
-                    if len(cache) > self.partial_limit:
-                        cache = cache[-self.partial_limit :]
-                    self.partial_comments[task_id] = cache
-
-                async def metadata_handler(aid: str, bvid: str, title: Optional[str]) -> None:
-                    self.store.update_task(task_id, aid=aid, bvid=bvid, title=title)
-                    meta["aid"], meta["bvid"], meta["title"] = aid, bvid, title
-
-                try:
-                    result = await scrape(
-                        record.normalized_url,
-                        output_path,
-                        max_duration=duration,
-                        storage_state=auth_state,
-                        batch_handler=batch_handler if streaming_to_db else None,
-                        metadata_handler=metadata_handler,
-                        existing_comments=base_existing_comments,
-                        existing_seen=base_seen,
-                        user_agent=ua,
-                        persist_file=not self.pg_sink,  # 有 DB 时跳过本地文件
-                    )
-                    if self.pg_sink and buffer:
-                        await flush_buffer(result.aid, result.bvid, result.title)
-                    success = True
-                    self.store.update_task(
-                        task_id,
-                        status="completed",
-                        output_path=str(result.output_path) if result.output_path else None,
-                        total_comments=len(result.comments),
-                        bvid=result.bvid,
-                        aid=result.aid,
-                        title=result.title,
-                    )
-                    break
-                except Exception as exc:
-                    last_error = str(exc)
-                    attempt_cache = list(self.partial_comments.get(task_id, []))
-                    if self.pg_sink and buffer and meta.get("aid") and meta.get("bvid"):
+                    async def flush_buffer(aid: str, bvid: str, title: Optional[str]) -> None:
+                        if not self.pg_sink or not buffer:
+                            return
                         try:
-                            await flush_buffer(meta["aid"], meta["bvid"], meta.get("title"))
-                        except Exception:
-                            pass
-                    continue
+                            await self.pg_sink.save_comments(buffer, bvid=bvid, aid=aid, title=title)
+                            self._log(task_id, f"已写入 Postgres {len(buffer)} 条（批量）")
+                            buffer.clear()
+                        except Exception as exc:  # pragma: no cover - external service
+                            warn = f"[WARN] 批量写入 Postgres 失败: {exc}"
+                            print(warn)
+                            self._log(task_id, warn)
+
+                    async def batch_handler(chunk, aid, bvid, title):
+                        if not self.pg_sink:
+                            return
+                        buffer.extend(chunk)
+                        if len(buffer) >= BATCH_SIZE:
+                            await flush_buffer(aid, bvid, title)
+                        cache = self.partial_comments.get(task_id, [])
+                        cache.extend(chunk)
+                        if len(cache) > self.partial_limit:
+                            cache = cache[-self.partial_limit :]
+                        self.partial_comments[task_id] = cache
+
+                    async def metadata_handler(aid: str, bvid: str, title: Optional[str]) -> None:
+                        self.store.update_task(task_id, aid=aid, bvid=bvid, title=title)
+                        meta["aid"], meta["bvid"], meta["title"] = aid, bvid, title
+
+                    async def progress_handler(info: dict) -> None:
+                        payload = {
+                            "page": info.get("page"),
+                            "next_token": info.get("next_token"),
+                            "cursor": info.get("cursor"),
+                            "reported_total": info.get("reported_total"),
+                            "updated_at": datetime.utcnow().isoformat(),
+                        }
+                        self._save_resume_state(task_id, payload)
+                        total = info.get("reported_total")
+                        self._log(
+                            task_id,
+                            f"主楼翻页 progress: page={info.get('page')} next_token={str(info.get('next_token'))[:30]} reported_total={total}",
+                        )
+
+                    if resume_reset:
+                        resume_state = {}
+                        resume_reset = False
+                    else:
+                        resume_state = self._load_resume_state(task_id)
+                    raw_token = resume_state.get("next_token")
+                    start_cursor: Optional[str] = str(raw_token) if raw_token else None
+                    if start_cursor:
+                        self._log(task_id, f"从断点游标 {start_cursor[:30]}... 继续抓取，第 {resume_state.get('page')}")
+
+                    try:
+                        result = await scrape(
+                            record.normalized_url,
+                            output_path,
+                            max_duration=duration,
+                            storage_state=auth_state,
+                            batch_handler=batch_handler if streaming_to_db else None,
+                            metadata_handler=metadata_handler,
+                            existing_comments=base_existing_comments,
+                            existing_seen=base_seen,
+                            user_agent=ua,
+                            persist_file=not self.pg_sink,  # 有 DB 时跳过本地文件
+                            start_cursor=start_cursor,
+                            progress_handler=progress_handler,
+                        )
+                        if self.pg_sink and buffer:
+                            await flush_buffer(result.aid, result.bvid, result.title)
+                        success = True
+                        self.retry_state.pop(task_id, None)
+                        self._clear_resume_state(task_id)
+                        self._log(
+                            task_id,
+                            f"抓取完成: total={len(result.comments)} main_pages={result.main_pages} sub_pages={result.sub_pages}",
+                        )
+                        self.store.update_task(
+                            task_id,
+                            status="completed",
+                            output_path=str(result.output_path) if result.output_path else None,
+                            total_comments=len(result.comments),
+                            bvid=result.bvid,
+                            aid=result.aid,
+                            title=result.title,
+                        )
+                        break
+                    except MaxOffsetExceededError as exc:
+                        if start_cursor is not None:
+                            self._clear_resume_state(task_id)
+                            resume_reset = True
+                            last_error = str(exc)
+                            attempt_cache = list(self.partial_comments.get(task_id, []))
+                            continue
+                        last_error = str(exc)
+                        attempt_cache = list(self.partial_comments.get(task_id, []))
+                        if self.pg_sink and buffer and meta.get("aid") and meta.get("bvid"):
+                            try:
+                                await flush_buffer(meta["aid"], meta["bvid"], meta.get("title"))
+                            except Exception:
+                                pass
+                        break
+                    except Exception as exc:
+                        last_error = str(exc)
+                        attempt_cache = list(self.partial_comments.get(task_id, []))
+                        if self.pg_sink and buffer and meta.get("aid") and meta.get("bvid"):
+                            try:
+                                await flush_buffer(meta["aid"], meta["bvid"], meta.get("title"))
+                            except Exception:
+                                pass
+                        self._log(task_id, f"抓取异常: {last_error}")
+                        break
+                if success:
+                    break
 
         if not success:
             partial_count = len(attempt_cache)
@@ -279,6 +416,26 @@ class TaskManager:
                     total_counts = stats.get("total", total_counts)
                 except Exception:
                     pass
+            auto_retry_allowed = self.max_auto_retry and self.retry_state.get(task_id, 0) < self.max_auto_retry
+            if auto_retry_allowed:
+                self.retry_state[task_id] = self.retry_state.get(task_id, 0) + 1
+                self._log(
+                    task_id,
+                    f"准备自动重试（第 {self.retry_state[task_id]} 次），原因: {last_error or 'unknown'}",
+                )
+                self.store.update_task(
+                    task_id,
+                    status="pending",
+                    error=last_error or "scrape failed",
+                    total_comments=total_counts or None,
+                    bvid=meta.get("bvid") or record.bvid,
+                    aid=meta.get("aid") or record.aid,
+                    title=meta.get("title") or record.title,
+                )
+                delay = random.uniform(5, 20)
+                asyncio.create_task(self._delayed_retry(task_id, delay))
+                return
+            self.retry_state.pop(task_id, None)
             self.store.update_task(
                 task_id,
                 status="failed",
@@ -288,6 +445,7 @@ class TaskManager:
                 aid=meta.get("aid") or record.aid,
                 title=meta.get("title") or record.title,
             )
+            self._log(task_id, f"任务失败: {last_error or 'unknown error'}")
         else:
             self.partial_comments.pop(task_id, None)
 
@@ -302,36 +460,8 @@ def parse_links(raw: str) -> List[str]:
 
 
 def load_preview(task: TaskRecord, limit: int = 50) -> List[dict]:
-    if not task.output_path:
-        return []
-    path = Path(task.output_path)
-    if not path.exists():
-        return []
-    try:
-        if path.suffix.lower() == ".json":
-            data = json.loads(path.read_text(encoding="utf-8"))
-            comments = data.get("comments") or []
-        else:
-            with path.open(encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                comments = list(reader)
-        normalized: List[dict] = []
-        for record in comments:
-            row = dict(record)
-            flag = row.get("is_sub_reply")
-            if isinstance(flag, str):
-                row["is_sub_reply"] = flag.lower() in {"1", "true", "yes"}
-            like = row.get("like_count")
-            try:
-                row["like_count"] = int(like)
-            except (TypeError, ValueError):
-                row["like_count"] = 0
-            normalized.append(row)
-            if len(normalized) >= limit:
-                break
-        return normalized
-    except Exception:  # pragma: no cover - file corruption edge cases
-        return []
+    comments = _load_all_comments(task)
+    return comments[:limit] if comments else []
 
 
 def _normalize_comment_row(row: dict) -> Optional[dict]:
@@ -391,6 +521,25 @@ def _load_all_comments(task: TaskRecord) -> List[dict]:
         return comments
     except Exception:  # pragma: no cover - file corruption edge cases
         return []
+
+
+async def load_comments_for_task(task: TaskRecord, sink: Optional[PostgresSink]) -> List[dict]:
+    if sink and (task.bvid or task.normalized_url):
+        bvid = task.bvid or extract_bvid(task.normalized_url or "")
+        if bvid:
+            try:
+                rows = await sink.fetch_all(bvid=bvid, order="time")
+                normalized: List[dict] = []
+                for item in rows:
+                    data = dict(item)
+                    norm = _normalize_comment_row(data)
+                    if norm:
+                        norm["sub_count"] = data.get("sub_count") or 0
+                        normalized.append(norm)
+                return normalized
+            except Exception:
+                pass
+    return _load_all_comments(task)
 
 
 def _parse_time(value: str) -> float:
@@ -1110,6 +1259,14 @@ def create_app(
         )
 
         total_pages = max(1, math.ceil(filtered_total / page_size)) if filtered_total else 1
+        raffle_texts = {
+            "draw": _("raffle_draw"),
+            "loading": _("raffle_loading"),
+            "error": _("raffle_error"),
+            "empty": _("raffle_result_empty"),
+            "title": _("raffle_result_title"),
+            "link": _("open_in_bilibili"),
+        }
         return render_template(
             "detail.html",
             {
@@ -1130,8 +1287,61 @@ def create_app(
                 "using_db": using_db,
                 "user": user,
                 "tags_map": tags_map,
+                "raffle_texts": raffle_texts,
             },
         )
+
+    @app.post("/tasks/{task_id}/raffle")
+    async def raffle(task_id: str, request: Request) -> JSONResponse:
+        user = get_current_user(request)
+        if not user:
+            raise HTTPException(status_code=403, detail="请先登录")
+        lang = request.cookies.get("lang", "zh")
+        def _(key: str, **kwargs) -> str: return get_trans(lang, key, **kwargs)
+
+        task = store.get_task(task_id)
+        if not task or task.user_id != user.id:
+            raise HTTPException(status_code=404, detail=_("err_no_download"))
+        if not manager.pg_sink and not task.output_path:
+            raise HTTPException(status_code=404, detail=_("err_no_download"))
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        try:
+            count = int(payload.get("count") or 1)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=_("raffle_invalid_count"))
+        unique_user = bool(payload.get("unique_user", True))
+        seed = payload.get("seed") or None
+        comments = await load_comments_for_task(task, manager.pg_sink)
+        summary = run_raffle(comments, count=count, unique_by_user=unique_user, seed=seed)
+        return JSONResponse(
+            {
+                "winners": summary.winners,
+                "candidate_count": summary.candidate_count,
+                "unique_candidates": summary.unique_candidates,
+                "unique_by_user": summary.unique_by_user,
+                "seed": summary.seed,
+            }
+        )
+
+    @app.get("/tasks/{task_id}/wordcloud.png")
+    async def wordcloud_image(task_id: str, request: Request, refresh: Optional[int] = None) -> FileResponse:
+        user = get_current_user(request)
+        if not user:
+            raise HTTPException(status_code=403, detail="请先登录")
+        lang = request.cookies.get("lang", "zh")
+        def _(key: str, **kwargs) -> str: return get_trans(lang, key, **kwargs)
+
+        task = store.get_task(task_id)
+        if not task or task.user_id != user.id:
+            raise HTTPException(status_code=404, detail=_("err_no_download"))
+        comments = await load_comments_for_task(task, manager.pg_sink)
+        if not comments:
+            raise HTTPException(status_code=404, detail=_("wordcloud_no_data"))
+        path = await manager.build_wordcloud(task, comments, refresh=bool(refresh))
+        return FileResponse(path, media_type="image/png")
 
     @app.get("/tasks/{task_id}/download")
     async def download(task_id: str, request: Request) -> Response:

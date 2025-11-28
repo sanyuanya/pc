@@ -12,6 +12,8 @@ dependencies = [
     "playwright>=1.44.0",
     "python-multipart>=0.0.9",
     "uvicorn>=0.30.0",
+    "wordcloud>=1.9.3",
+    "jieba>=0.42.1",
 ]
 
 [project.optional-dependencies]

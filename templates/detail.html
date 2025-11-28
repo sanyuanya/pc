@@ -338,19 +338,163 @@
         </div>
       </div>
     </div>
+
+    <div class="card">
+      <div class="card-header" style="justify-content: space-between; align-items: center;">
+        <h3 class="card-title">{{ _("wordcloud_title") }}</h3>
+        <button type="button" id="wordcloud-refresh" class="btn btn-secondary">{{ _("wordcloud_refresh") }}</button>
+      </div>
+      <div class="card-body">
+        <div style="width: 100%; aspect-ratio: 16 / 9; background: #050816; border-radius: var(--radius-md); overflow: hidden; display: flex; align-items: center; justify-content: center;">
+          <img id="wordcloud-img" src="/tasks/{{ task.id }}/wordcloud.png?v={{ task.updated_at|urlencode }}" alt="wordcloud" style="width: 100%; height: 100%; object-fit: contain;">
+        </div>
+        <p class="text-muted text-sm" style="margin-top: 0.75rem;">{{ _("wordcloud_desc") }}</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">{{ _("raffle_title") }}</h3>
+      </div>
+      <div class="card-body" style="display: flex; flex-direction: column; gap: 0.75rem;">
+        <p class="text-muted text-sm">{{ _("raffle_desc") }}</p>
+        <form id="raffle-form" data-endpoint="/tasks/{{ task.id }}/raffle">
+          <div class="form-group">
+            <label class="text-sm text-muted">{{ _("raffle_count_label") }}</label>
+            <input type="number" name="count" class="input" value="3" min="1" max="100">
+          </div>
+          <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem;">
+            <input type="checkbox" name="unique" checked>
+            {{ _("raffle_unique_label") }}
+          </label>
+          <div class="form-group">
+            <label class="text-sm text-muted">{{ _("raffle_seed_label") }}</label>
+            <input type="text" name="seed" class="input" placeholder="{{ _('raffle_seed_placeholder') }}">
+          </div>
+          <button type="button" id="raffle-button" class="btn btn-primary" style="width: 100%;">{{ _("raffle_draw") }}</button>
+        </form>
+        <div id="raffle-result" class="text-sm text-muted" style="min-height: 40px;">{{ _("raffle_result_placeholder") }}</div>
+        <p class="text-muted text-xs">{{ _("raffle_rule_hint") }}</p>
+      </div>
+    </div>
   </div>
 </div>
 {% endblock %}
 
 {% block extra_js %}
 <script>
-  (function() {
-    const isRunning = {{ 'true' if task.status == 'running' else 'false' }};
+  (() => {
+    const isRunning = {{ (task.status == 'running') | tojson }};
     if (isRunning) {
       setTimeout(() => {
         location.reload();
       }, 10000);
     }
+
+    const form = document.getElementById('raffle-form');
+    const button = document.getElementById('raffle-button');
+    const resultBox = document.getElementById('raffle-result');
+    if (!form || !button || !resultBox) {
+      return;
+    }
+
+    const endpoint = form.dataset.endpoint || '';
+    const t = {{ raffle_texts | tojson }};
+    let running = false;
+
+    const renderWinners = (winners) => {
+      if (!winners.length) {
+        resultBox.innerHTML = `<p>${t.empty}</p>`;
+        return;
+      }
+      const items = winners
+        .map((w, idx) => {
+          const content = (w.content || '').replace(/\n/g, ' ');
+          const short = content.length > 80 ? `${content.slice(0, 77)}...` : content;
+          const link = w.origin_url
+            ? `<a href="${w.origin_url}" target="_blank" rel="noopener">${t.link}</a>`
+            : '';
+          return `
+            <li>
+              <strong>#${idx + 1}</strong> ${w.user_name || 'User'} (UID: ${w.user_id || '-'})<br>
+              <span>${short || '(...)'}</span>
+              <div>${link}</div>
+            </li>
+          `;
+        })
+        .join('');
+      resultBox.innerHTML = `<div><strong>${t.title}</strong><ul>${items}</ul></div>`;
+    };
+
+    const setLoading = (state) => {
+      running = state;
+      button.disabled = state;
+      button.textContent = state ? t.loading : t.draw;
+    };
+
+    const draw = async () => {
+      if (!endpoint || running) {
+        return;
+      }
+      const formData = new FormData(form);
+      const requested = parseInt(formData.get('count') || '1', 10);
+      const seedValue = formData.get('seed');
+      const trimmedSeed = seedValue ? seedValue.toString().trim() : '';
+      const payload = {
+        count: Number.isFinite(requested) && requested > 0 ? requested : 1,
+        unique_user: formData.get('unique') === 'on',
+        seed: trimmedSeed || null,
+      };
+      resultBox.innerHTML = `<p>${t.loading}</p>`;
+      setLoading(true);
+      try {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          credentials: 'same-origin',
+        });
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(text || response.statusText);
+        }
+        const data = await response.json();
+        renderWinners(data.winners || []);
+      } catch (err) {
+        console.error(err);
+        const msg = err && err.message ? ` (${err.message})` : '';
+        resultBox.innerHTML = `<p>${t.error}${msg}</p>`;
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    button.addEventListener('click', () => {
+      draw();
+    });
+    form.addEventListener('submit', (event) => event.preventDefault());
+  })();
+  (() => {
+    const img = document.getElementById('wordcloud-img');
+    const refreshBtn = document.getElementById('wordcloud-refresh');
+    if (!img || !refreshBtn) {
+      return;
+    }
+    refreshBtn.addEventListener('click', () => {
+      refreshBtn.disabled = true;
+      const baseUrl = `/tasks/{{ task.id }}/wordcloud.png`;
+      const url = new URL(baseUrl, window.location.origin);
+      url.searchParams.set('refresh', '1');
+      url.searchParams.set('ts', Date.now().toString());
+      img.src = url.toString();
+      const reset = () => {
+        refreshBtn.disabled = false;
+        img.onload = null;
+        img.onerror = null;
+      };
+      img.onload = reset;
+      img.onerror = reset;
+    });
   })();
 </script>
 {% endblock %}

@@ -8,6 +8,7 @@
 - 可配置抓取时长与分页大小，默认持续运行直至接口确认没有更多评论，以完整性优先。
 - 自动写出结构化的 JSON/CSV 文件，方便后续做数据分析或二次利用。
 - 支持加载 Playwright `storage_state` 登录态，避免 B 站在未登录时只返回“精选评论”导致主楼缺失。
+- Web 控制台内置“评论词云”，可快速观察高频词并支持一键刷新。
 
 ## 环境准备（uv）
 1. 安装 [uv](https://github.com/astral-sh/uv)：
@@ -49,11 +50,47 @@ uv run python main.py --url https://www.bilibili.com/video/BVxxxxxxx --output da
 | `APP_SERVE` (`1/true`) | `--serve` | 强制以 Web 模式启动 |
 | `APP_HOST` / `APP_PORT` | `--host` / `--port` | Web 服务监听地址 |
 | `APP_DATA_DIR` | `--data-dir` | 数据持久化目录 |
+| `APP_WORDCLOUD_FONT` | - | （可选）词云字体路径，若留空则尝试自动探测系统字体 |
 
 示例：`APP_URL=https://www.bilibili.com/video/BVxxxxxxx APP_OUTPUT=/tmp/comments.json uv run python main.py`
 会在未传入 CLI 参数时使用环境变量的值。
 
+### 评论抽奖（公平公开）
+
+抓取完评论后，可直接在本地或服务器上运行内置的抽奖脚本，默认按 `user_id` 去重、使用系统随机源，抽奖算法全部开源在 `pc/raffle.py`：
+
+```bash
+uv run python main.py --raffle --output data/comments.json --raffle-count 3
+```
+
+常用选项：
+
+| 参数 / 环境变量 | 说明 |
+| --- | --- |
+| `--raffle` / `APP_RAFFLE=1` | 进入抽奖模式（不会重新抓取） |
+| `--raffle-count N` / `APP_RAFFLE_COUNT` | 抽取 `N` 条中奖评论 |
+| `--raffle-allow-duplicate` / `APP_RAFFLE_ALLOW_DUP=1` | 允许同一用户重复中奖（默认按 `user_id` 去重，若没有用户 ID，则退化为按 `comment_id` 去重） |
+| `--raffle-seed "12345"` / `APP_RAFFLE_SEED` | 指定随机种子，方便公告时复现（未提供则使用 `SystemRandom`） |
+
+抽奖规则写在 README、公示于系统中，同时提供了完整的实现代码，确保透明可复核：
+
+1. 加载 JSON/CSV 中的全部评论，过滤掉空内容或缺少 `comment_id` 的记录；
+2. 默认按 `user_id` 去重，若评论没有用户 ID，则使用 `comment_id` 去重；可通过 `--raffle-allow-duplicate` 放宽；
+3. 使用 `random.SystemRandom`（或显式 `seed`）无放回抽样，抽够数量或评论耗尽即停止；
+4. 输出中奖用户、评论 ID、内容与原始链接，便于复制到公告中，同时在控制台提示“算法见 pc/raffle.py”以满足公开要求。
+
 运行结束后，终端会打印本轮抓取到的评论总数，并在指定位置生成结果文件。JSON 文件包含视频 BV 号、总评论数与评论数组；CSV 则按列展开评论 ID、父评论 ID、用户信息、点赞数等字段。
+
+### 评论词云可视化
+
+在任务详情页的右侧会自动展示一张彩色词云图，数据来自最新抓取到的评论内容。词云生成流程：
+
+1. 读取全部评论文本，使用 `jieba` 中文分词去除常见停用词；
+2. 使用 `wordcloud` 根据词频生成 16:9 PNG，颜色采用随机的冷色调粉彩搭配；
+3. 每次同步任务后会自动刷新，亦可手动点击“刷新词云”即时重新渲染；
+4. 词云图片保存在 `data/wordclouds/<task_id>.png`，便于在报告或 PPT 中复用。
+
+若服务器上缺少中文字库，可通过设置 `APP_WORDCLOUD_FONT=/path/to/font.ttf` 指定字体文件，避免乱码或方块字。默认会尝试自动探测系统中的 PingFang / Noto Sans CJK 等常用字体。
 
 ### 写入 Postgres
 
@@ -79,6 +116,7 @@ uv run python main.py --serve --host 0.0.0.0 --port 8000 --data-dir data
 - 每位用户拥有独立账号密码，可在登录页直接“注册 + 登录”；首次注册自动接管旧版（单用户）遗留任务；
 - 左侧表单支持一次粘贴多条链接，任务会顺序执行，状态实时刷新，支持重试、同步与删除；
 - 详情页内提供全量评论列表（分页 / 排序 / 搜索），可跳转到 B 站回复、复制链接、重试或同步任务；
+- 详情页右侧提供“评论抽奖”卡片，可配置名额、去重规则、随机种子，并实时展示中奖名单；
 - 后端使用 SQLite 记录任务与用户信息，导出文件存储于 `data/exports/`，默认 JSON，也支持 CSV；
 - 任务列表桌面端为表格、移动端为卡片视图，复制按钮/状态徽章在两端风格一致。
 
@@ -150,3 +188,8 @@ CI workflow 新增 `docker` 作业，会在推送到 `main` 分支时构建并�
 - 抓取过程中 API 返回 `code != 0` 时脚本会打印警告，可稍后重试或降低抓取速率。
 - 评论较多的视频建议将 `--timeout` 调大，或通过 `--output` 指定 CSV 以便分批分析。
 - B 站在未登录状态下常常只返回“精选评论”，请按上文提示保存 `storage_state` 并通过 `--storage-state`（CLI）或 Web 页面中的“上传登录态”功能携带 Cookie。
+- Web 控制台会把抓取进度写入 `data/resume/<task_id>.json`，失败或手动“重试”时会从上次页码继续补抓（依赖 Postgres 中已写入的 comment_id 去重）。若接口返回 “max offset exceeded” 等翻页错误，系统会自动清理断点并从第一页重新抓取，无需手工 SSH。
+- 通过 `APP_AUTO_RETRY`（默认 1）可以控制失败后的自动延迟重试次数，系统会在 5~20 秒后重新入队并尝试不同的 UA/登录态。
+- 抓取主楼与楼中楼时默认加入 0.4 秒基础延迟 + 随机抖动，并且在遇到 412/429/JSON 异常时逐步退避重试，可显著降低被风控的概率；如仍频繁触发，可进一步降低 `APP_MAX_WORKERS` 并提供真实浏览器 UA。
+- 当评论量极大（>1 万）时建议在任务设置里把 `timeout` 设得更长（或置 0），以便 `x/v2/reply/main` 接口有足够时间翻完全部游标；新的游标机制也会自动在 Postgres 中去重，再次全量抓取不会重复写入。
+- 每个任务的详细抓取日志会写到 `data/logs/<task_id>.log`，包含 UA/登录态选择、翻页游标、Postgres 写入等信息；出现异常时可直接查看该文件定位问题。

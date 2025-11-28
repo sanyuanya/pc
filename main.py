@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import uvicorn
 
 from pc.postgres import PostgresSink
 from pc.scraper import normalize_video_url, scrape
+from pc.raffle import run_raffle
 from pc.web import create_app
 
 
@@ -46,11 +48,31 @@ def parse_args() -> argparse.Namespace:
         help="playwright storage_state.json 路径，带登录态可提高评论完整度",
     )
     parser.add_argument("--user-agent", help="自定义 User-Agent，避免 412 风控")
-    parser.add_argument("--pg-dsn", help="Postgres 连接串，提供后会将评论写入数据库")
+    parser.add_argument("--pg-dsn",  default="postgresql://postgres:change-me@127.0.0.1:5433/postgres?sslmode=disable", help="Postgres 连接串，提供后会将评论写入数据库")
     parser.add_argument(
         "--pg-table",
         default=None,
         help="Postgres 表名，默认为 comments，可覆盖",
+    )
+    parser.add_argument(
+        "--raffle",
+        action="store_true",
+        help="对指定输出文件执行评论抽奖而不重新抓取",
+    )
+    parser.add_argument(
+        "--raffle-count",
+        type=int,
+        default=1,
+        help="抽取的中奖评论数量（默认 1）",
+    )
+    parser.add_argument(
+        "--raffle-allow-duplicate",
+        action="store_true",
+        help="允许同一用户中奖多次（默认按 user_id 去重）",
+    )
+    parser.add_argument(
+        "--raffle-seed",
+        help="可选的随机种子，用于复现抽奖结果（未提供则使用系统随机源）",
     )
     return parser.parse_args()
 
@@ -84,6 +106,18 @@ def apply_env_overrides(args: argparse.Namespace) -> argparse.Namespace:
     if not args.pg_table:
         args.pg_table = env.get("APP_PG_TABLE") or env.get("POSTGRES_TABLE")
     args.serve = args.serve or _env_bool("APP_SERVE")
+    args.raffle = args.raffle or _env_bool("APP_RAFFLE")
+    count_env = env.get("APP_RAFFLE_COUNT")
+    if count_env and args.raffle_count == 1:
+        try:
+            args.raffle_count = int(count_env)
+        except ValueError:
+            pass
+    if _env_bool("APP_RAFFLE_ALLOW_DUP"):
+        args.raffle_allow_duplicate = True
+    seed_env = env.get("APP_RAFFLE_SEED")
+    if seed_env and not args.raffle_seed:
+        args.raffle_seed = seed_env
     host_env = env.get("APP_HOST")
     if host_env:
         args.host = host_env
@@ -97,6 +131,55 @@ def apply_env_overrides(args: argparse.Namespace) -> argparse.Namespace:
     if data_dir_env:
         args.data_dir = data_dir_env
     return args
+
+
+def _load_comments_from_file(path: Path) -> list[dict]:
+    if not path.exists():
+        raise FileNotFoundError(f"未找到评论文件: {path}")
+    if path.suffix.lower() == ".json":
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return list(data.get("comments") or [])
+    if path.suffix.lower() == ".csv":
+        with path.open(encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            return list(reader)
+    raise ValueError("仅支持 JSON 或 CSV 评论文件")
+
+
+def run_raffle_cli(
+    output: Path,
+    *,
+    count: int,
+    unique_user: bool,
+    seed: Optional[str],
+) -> None:
+    comments = _load_comments_from_file(output)
+    if not comments:
+        print("[RAFFLE] 文件中没有可用的评论数据，无法抽奖。")
+        return
+    summary = run_raffle(comments, count=count, unique_by_user=unique_user, seed=seed)
+    if not summary.winners:
+        print("[RAFFLE] 符合条件的评论数量不足，无法抽奖。")
+        return
+    mode = "系统熵源" if not seed else f"seed={seed}"
+    print(
+        f"[RAFFLE] 共 {summary.candidate_count} 条候选评论，"
+        f"{'按 user_id 去重' if unique_user else '允许重复用户'}，"
+        f"随机方式: {mode}"
+    )
+    for idx, winner in enumerate(summary.winners, start=1):
+        snippet = (winner.get("content") or "").replace("\n", " ")
+        if len(snippet) > 80:
+            snippet = snippet[:77] + "..."
+        link = winner.get("origin_url") or ""
+        print(
+            f"  #{idx} 用户: {winner.get('user_name') or '未知'} "
+            f"(UID: {winner.get('user_id') or '-'}, 评论ID: {winner.get('comment_id') or '-'})"
+        )
+        print(f"      内容: {snippet or '(空)'}")
+        if link:
+            print(f"      链接: {link}")
+    print("[RAFFLE] 抽奖算法实现详见 pc/raffle.py，以上输出可复制到公告。")
 
 
 async def run_cli(
@@ -235,6 +318,10 @@ def run_server(
 
 def main() -> None:
     args = apply_env_overrides(parse_args())
+    if args.raffle:
+        unique = not args.raffle_allow_duplicate
+        run_raffle_cli(Path(args.output), count=args.raffle_count, unique_user=unique, seed=args.raffle_seed)
+        return
     if args.serve:
         run_server(
             args.host,

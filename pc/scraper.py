@@ -4,15 +4,20 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import random
 import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Set, Tuple, Deque
+from collections import deque
+import math
 from json import JSONDecodeError
 
 from playwright.async_api import BrowserContext, Page, Request, Route, async_playwright
+
+from pc.wbi import sign_wbi_params
 
 DEFAULT_USER_AGENTS = [
     # Realistic desktop Chrome UAs; keep recent to avoid “headless”/old-version detection
@@ -26,10 +31,15 @@ def choose_user_agent(custom: Optional[str] = None) -> str:
     if custom:
         return custom.strip()
     return DEFAULT_USER_AGENTS[0]
-COMMENTS_API = "https://api.bilibili.com/x/v2/reply"
+COMMENTS_API = "https://api.bilibili.com/x/v2/reply/main"
+COMMENTS_API_LEGACY = "https://api.bilibili.com/x/v2/reply"
 SUB_COMMENTS_API = "https://api.bilibili.com/x/v2/reply/reply"
 VIEW_API = "https://api.bilibili.com/x/web-interface/view"
 BLOCKED_TYPES = {"image", "media", "font", "stylesheet"}
+
+
+class MaxOffsetExceededError(RuntimeError):
+    """Raised when the API rejects the requested page offset."""
 
 
 def extract_bvid(text: str) -> Optional[str]:
@@ -116,27 +126,32 @@ async def _request_with_retry(
     *,
     params: Dict[str, object],
     headers: Dict[str, str],
-    retries: int = 3,
+    retries: int = 5,
     backoff: float = 0.8,
 ) -> Dict:
-    """简单重试，确保单页请求尽量成功，牺牲性能换完整性。"""
+    """带抖动的重试，尽量规避临时的 412/429 或 JSON 错误。"""
 
     last_error: Optional[Dict] = None
     for attempt in range(1, retries + 1):
         resp = await context.request.get(url, params=params, headers=headers)
-        if resp.status == 412:
-            raise RuntimeError("接口返回 412，可能 UA/Cookie 不匹配或被风控，请检查登录态和 User-Agent")
+        if resp.status in {412, 429}:
+            # 视为临时风控，随机等待后重试
+            last_error = {"error": f"http_{resp.status}", "status": resp.status}
+            await asyncio.sleep(backoff * attempt + random.uniform(0.2, 0.8))
+            continue
         try:
             data = await resp.json()
         except JSONDecodeError:
             # API occasionally returns empty body or HTML; retry in those cases
             last_error = {"error": "invalid_json", "status": resp.status}
-            await asyncio.sleep(backoff * attempt)
+            await asyncio.sleep(backoff * attempt + random.uniform(0.2, 0.8))
             continue
         if data.get("code") == 0:
             return data
+        if data.get("code") == -400 and "max offset exceeded" in (data.get("message") or "").lower():
+            raise MaxOffsetExceededError("B站评论接口提示翻页偏移超过上限，需要从第一页重新抓取")
         last_error = data
-        await asyncio.sleep(backoff * attempt)
+        await asyncio.sleep(backoff * attempt + random.uniform(0.2, 0.8))
     raise RuntimeError(f"评论接口多次失败: {last_error}")
 
 
@@ -153,7 +168,8 @@ async def _fetch_sub_replies(
     """针对单条主楼，循环拉取子评论直到接口提示结束。"""
 
     comments: List[Dict[str, object]] = []
-    params = {"type": 1, "oid": aid, "ps": 20, "pn": 1, "root": root_id}
+    safe_size = 20
+    params = {"type": 1, "oid": aid, "ps": safe_size, "pn": 1, "root": root_id, "mode": 3}
     sub_pages = 0
     while True:
         # 这里循环翻子评论直到接口返回 is_end，保证楼中楼拿全
@@ -177,7 +193,7 @@ async def _fetch_sub_replies(
         if cursor.get("is_end"):
             break
         params["pn"] = cursor.get("next") or (params["pn"] + 1)
-        await asyncio.sleep(delay)
+        await asyncio.sleep(delay + random.uniform(0, delay or 0.2))
     return comments, sub_pages
 
 
@@ -196,9 +212,11 @@ async def fetch_all_comments(
     batch_handler: Optional[
         Callable[[List[Dict[str, object]], str, str, Optional[str]], Awaitable[None]]
     ] = None,
+    start_cursor: Optional[str] = None,
+    progress_handler: Optional[Callable[[Dict[str, object]], Awaitable[None]]] = None,
 ) -> Tuple[List[Dict[str, object]], Dict[str, int]]:
     safe_size = max(1, min(page_size, 49))  # 接口限制 ps<=49，避免报 ps out of bounds
-    base_params = {"type": 1, "oid": aid, "sort": 0, "ps": safe_size}  # sort=0 按时间
+    base_params = {"type": 1, "oid": aid, "mode": 3, "ps": safe_size}
     ua = choose_user_agent(user_agent)
     headers = {"Referer": f"https://www.bilibili.com/video/{bvid}/", "User-Agent": ua}
     seen: Set[str] = set(existing_seen or [])
@@ -206,7 +224,12 @@ async def fetch_all_comments(
     started = time.monotonic()
     stats = {"main_pages": 0, "sub_pages": 0}
     reported_total: Optional[int] = None
-    current_page = 1
+    cursor_token = start_cursor if start_cursor is not None else ""
+    page_counter = 0
+    consecutive_stalls = 0
+    recent_tokens: Deque[Optional[str]] = deque(maxlen=4)
+    fallback_triggered = False
+    fallback_page: Optional[int] = None
 
     while True:
         page_batch: List[Dict[str, object]] = []
@@ -215,15 +238,22 @@ async def fetch_all_comments(
             print("[WARN] 达到用户设置的时间上限，可能仍有评论未抓取")
             break
         params = dict(base_params)
-        params["pn"] = current_page
-        data = await _request_with_retry(context, COMMENTS_API, params=params, headers=headers)
+        pagination_payload = {"offset": cursor_token or ""}
+        params["pagination_str"] = json.dumps(pagination_payload, ensure_ascii=False, separators=(",", ":"))
+        params["plat"] = 1
+        params["web_location"] = 1315875
+        signed_params = await sign_wbi_params(context.request, params)
+        data = await _request_with_retry(context, COMMENTS_API, params=signed_params, headers=headers)
         payload = data.get("data") or {}
         cursor = payload.get("cursor") or {}
         reported_total = cursor.get("all_count") or reported_total
         replies = payload.get("replies") or []
         stats["main_pages"] += 1
+        page_counter += 1
         if not replies:
-            break
+            consecutive_stalls += 1
+        else:
+            consecutive_stalls = 0
         # 这里遍历每个主楼
         for reply in replies:
             item = build_comment(reply)
@@ -255,16 +285,77 @@ async def fetch_all_comments(
                     stats["sub_pages"] += sub_pages
                 comments.extend(extra)
                 page_batch.extend(extra)
-        if cursor.get("is_end"):
+        pagination_reply = cursor.get("pagination_reply")
+        next_token: Optional[str] = None
+        if isinstance(pagination_reply, str):
+            next_token = pagination_reply
+        elif isinstance(pagination_reply, dict):
+            val = pagination_reply.get("next_offset") or pagination_reply.get("next")
+            if isinstance(val, str):
+                next_token = val
+        if progress_handler:
+            payload = {
+                "page": page_counter,
+                "next_token": next_token,
+                "cursor": cursor,
+                "reported_total": reported_total,
+            }
+            try:
+                await progress_handler(payload)
+            except Exception as exc:  # pragma: no cover - progress hook failure不影响主流程
+                print(f"[WARN] 记录抓取进度失败: {exc}")
+        recent_tokens.append(next_token)
+        repeated = (
+            len(recent_tokens) == recent_tokens.maxlen
+            and next_token
+            and all(token == next_token for token in recent_tokens)
+        )
+        if consecutive_stalls >= 3 or repeated or cursor.get("is_end") or not next_token:
+            if cursor.get("is_end") or not next_token:
+                break
+            fallback_triggered = True
+            fallback_page = cursor.get("next") or (page_counter + 1)
             break
         if batch_handler and page_batch:
             try:
                 await batch_handler(page_batch, aid, bvid, title)
             except Exception as exc:  # pragma: no cover - external handler errors
                 print(f"[WARN] 批量写入失败: {exc}")
-        # 这里根据 cursor 请求下一页主楼
-        current_page = cursor.get("next") or (current_page + 1)
-        await asyncio.sleep(delay)
+        cursor_token = next_token
+        await asyncio.sleep(delay + random.uniform(0, delay or 0.2))
+
+    if fallback_triggered:
+        legacy_page = max(1, int(fallback_page or page_counter + 1))
+        overlap_pages = 2
+        legacy_page = max(1, legacy_page - overlap_pages)
+        while True:
+            legacy_params = {
+                "type": 1,
+                "oid": aid,
+                "sort": 0,
+                "ps": safe_size,
+                "pn": legacy_page,
+                "nohot": 1,
+            }
+            legacy_data = await _request_with_retry(context, COMMENTS_API_LEGACY, params=legacy_params, headers=headers)
+            legacy_payload = legacy_data.get("data") or {}
+            legacy_replies = legacy_payload.get("replies") or []
+            page_info = legacy_payload.get("page") or {}
+            for reply in legacy_replies:
+                item = build_comment(reply)
+                if item["comment_id"] and item["comment_id"] not in seen:
+                    seen.add(item["comment_id"])
+                    comments.append(item)
+                for child in reply.get("replies") or []:
+                    child_item = build_comment(child, parent_id=item["comment_id"])
+                    if child_item["comment_id"] and child_item["comment_id"] not in seen:
+                        seen.add(child_item["comment_id"])
+                        comments.append(child_item)
+            total_pages = math.ceil((page_info.get("count") or 0) / float(page_info.get("size") or safe_size)) or legacy_page
+            next_page = page_info.get("num", legacy_page)
+            if next_page >= total_pages:
+                break
+            legacy_page = next_page + 1
 
     stats["reported_total"] = reported_total
     return comments, stats
@@ -330,6 +421,8 @@ async def scrape(
     existing_seen: Optional[Set[str]] = None,
     user_agent: Optional[str] = None,
     persist_file: bool = True,
+    start_cursor: Optional[str] = None,
+    progress_handler: Optional[Callable[[Dict[str, object]], Awaitable[None]]] = None,
 ) -> ScrapeResult:
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -367,6 +460,8 @@ async def scrape(
             existing_seen=existing_seen,
             user_agent=user_agent,
             batch_handler=batch_handler,
+            start_cursor=start_cursor,
+            progress_handler=progress_handler,
         )
         await browser.close()
 
@@ -397,4 +492,5 @@ __all__ = [
     "ScrapeResult",
     "COMMENTS_API",
     "fetch_all_comments",
+    "MaxOffsetExceededError",
 ]

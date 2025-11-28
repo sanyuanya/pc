@@ -154,28 +154,44 @@
         
         // Theme Toggle
         const themeBtn = document.getElementById('theme-toggle');
-        const themeIconUse = themeBtn.querySelector('use');
-        const themeBtnText = themeBtn.querySelector('.btn-text');
-        const TEXT_LIGHT = '{{ _("theme_light") }}';
-        const TEXT_DARK = '{{ _("theme_dark") }}';
+        if (themeBtn) {
+          const themeIconUse = themeBtn.querySelector('use');
+          const themeBtnText = themeBtn.querySelector('.btn-text');
+          const TEXT_LIGHT = '{{ _("theme_light") }}';
+          const TEXT_DARK = '{{ _("theme_dark") }}';
 
-        function setTheme(mode) {
-          root.dataset.theme = mode;
-          localStorage.setItem('theme', mode);
-          if (mode === 'dark') {
-            themeIconUse.setAttribute('href', '#icon-sun');
-            themeBtnText.textContent = TEXT_LIGHT;
-          } else {
-            themeIconUse.setAttribute('href', '#icon-moon');
-            themeBtnText.textContent = TEXT_DARK;
+          function setTheme(mode) {
+            root.dataset.theme = mode;
+            try {
+              localStorage.setItem('theme', mode);
+            } catch (err) {
+              document.cookie = `theme=${mode};path=/;max-age=31536000`;
+            }
+            if (mode === 'dark') {
+              themeIconUse.setAttribute('href', '#icon-sun');
+              themeBtnText.textContent = TEXT_LIGHT;
+            } else {
+              themeIconUse.setAttribute('href', '#icon-moon');
+              themeBtnText.textContent = TEXT_DARK;
+            }
           }
+
+          function readTheme() {
+            const fallback = root.dataset.theme || 'dark';
+            try {
+              return localStorage.getItem('theme') || fallback;
+            } catch (err) {
+              const match = document.cookie.match(/theme=([^;]+)/);
+              return match ? match[1] : fallback;
+            }
+          }
+
+          setTheme(readTheme());
+          themeBtn.addEventListener('click', () => {
+            const current = root.dataset.theme === 'dark' ? 'dark' : 'light';
+            setTheme(current === 'dark' ? 'light' : 'dark');
+          });
         }
-        const savedTheme = localStorage.getItem('theme') || 'light';
-        setTheme(savedTheme);
-        themeBtn.addEventListener('click', () => {
-          const current = root.dataset.theme;
-          setTheme(current === 'dark' ? 'light' : 'dark');
-        });
 
         // Mobile Menu Toggle
         const menuBtn = document.getElementById('menu-toggle');

@@ -7,7 +7,7 @@ services:
       - pgdata:/var/lib/postgresql/18/main
     restart: unless-stopped
   comment-exporter:
-    image: hj212223/bilibili:3fe50a5ef4e1f38c8ce4ac9ee2d4f3aee50f33e0
+    image: hj212223/bilibili:aaf55c601f4b59724c55c1f15f7dceb999cd282f
     environment:
       - APP_PG_DSN=postgresql://postgres:change-me@postgres:5432/postgres?sslmode=disable
       - APP_HOST=0.0.0.0

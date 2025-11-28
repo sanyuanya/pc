@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
         help="playwright storage_state.json 路径，带登录态可提高评论完整度",
     )
     parser.add_argument("--user-agent", help="自定义 User-Agent，避免 412 风控")
-    parser.add_argument("--pg-dsn",  default="postgresql://postgres:change-me@127.0.0.1:5433/postgres?sslmode=disable", help="Postgres 连接串，提供后会将评论写入数据库")
+    parser.add_argument("--pg-dsn", help="Postgres 连接串，提供后会将评论写入数据库")
     parser.add_argument(
         "--pg-table",
         default=None,

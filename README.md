@@ -35,6 +35,24 @@ uv run python main.py --url https://www.bilibili.com/video/BVxxxxxxx --output da
 - `--output`：输出文件路径，后缀 `.json` 或 `.csv` 将决定文件格式，默认 `comments.json`。
 - `--timeout`：最长抓取秒数，超时后自动停止；默认为 `0`，表示持续运行直到评论抓取完毕。
 
+也可以通过环境变量提供同样的参数（当 CLI 未显式传入时会自动读取）：
+
+| 环境变量 | 对应 CLI | 说明 |
+| --- | --- | --- |
+| `APP_URL` / `BILI_URL` | `--url` | 视频链接或 BV 号 |
+| `APP_OUTPUT` | `--output` | 输出文件路径 |
+| `APP_TIMEOUT` | `--timeout` | 最长抓取秒数 |
+| `APP_STORAGE_STATE` | `--storage-state` | Playwright 登录态 |
+| `APP_USER_AGENT` | `--user-agent` | 自定义 User-Agent |
+| `APP_PG_DSN` / `POSTGRES_DSN` | `--pg-dsn` | Postgres 连接串 |
+| `APP_PG_TABLE` / `POSTGRES_TABLE` | `--pg-table` | Postgres 表名 |
+| `APP_SERVE` (`1/true`) | `--serve` | 强制以 Web 模式启动 |
+| `APP_HOST` / `APP_PORT` | `--host` / `--port` | Web 服务监听地址 |
+| `APP_DATA_DIR` | `--data-dir` | 数据持久化目录 |
+
+示例：`APP_URL=https://www.bilibili.com/video/BVxxxxxxx APP_OUTPUT=/tmp/comments.json uv run python main.py`
+会在未传入 CLI 参数时使用环境变量的值。
+
 运行结束后，终端会打印本轮抓取到的评论总数，并在指定位置生成结果文件。JSON 文件包含视频 BV 号、总评论数与评论数组；CSV 则按列展开评论 ID、父评论 ID、用户信息、点赞数等字段。
 
 ### 写入 Postgres

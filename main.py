@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 from pathlib import Path
 from typing import Optional
@@ -33,7 +34,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="启动带可视化界面的 Web 服务器",
     )
-    parser.add_argument("--host", default="127.0.0.1", help="Web 服务器监听地址")
+    parser.add_argument("--host", default="0.0.0.0", help="Web 服务器监听地址")
     parser.add_argument("--port", type=int, default=8000, help="Web 服务器端口")
     parser.add_argument(
         "--data-dir",
@@ -52,6 +53,50 @@ def parse_args() -> argparse.Namespace:
         help="Postgres 表名，默认为 comments，可覆盖",
     )
     return parser.parse_args()
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def apply_env_overrides(args: argparse.Namespace) -> argparse.Namespace:
+    env = os.environ
+    if not args.url:
+        args.url = env.get("APP_URL") or env.get("BILI_URL")
+    if args.output == "comments.json":
+        args.output = env.get("APP_OUTPUT") or args.output
+    if not args.timeout:
+        timeout_raw = env.get("APP_TIMEOUT")
+        if timeout_raw:
+            try:
+                args.timeout = int(timeout_raw)
+            except ValueError:
+                pass
+    if not args.storage_state:
+        args.storage_state = env.get("APP_STORAGE_STATE")
+    if not args.user_agent:
+        args.user_agent = env.get("APP_USER_AGENT")
+    if not args.pg_dsn:
+        args.pg_dsn = env.get("APP_PG_DSN") or env.get("POSTGRES_DSN")
+    if not args.pg_table:
+        args.pg_table = env.get("APP_PG_TABLE") or env.get("POSTGRES_TABLE")
+    args.serve = args.serve or _env_bool("APP_SERVE")
+    host_env = env.get("APP_HOST")
+    if host_env:
+        args.host = host_env
+    port_raw = env.get("APP_PORT")
+    if port_raw:
+        try:
+            args.port = int(port_raw)
+        except ValueError:
+            pass
+    data_dir_env = env.get("APP_DATA_DIR")
+    if data_dir_env:
+        args.data_dir = data_dir_env
+    return args
 
 
 async def run_cli(
@@ -189,7 +234,7 @@ def run_server(
 
 
 def main() -> None:
-    args = parse_args()
+    args = apply_env_overrides(parse_args())
     if args.serve:
         run_server(
             args.host,

@@ -1,45 +1,37 @@
-FROM ghcr.io/astral-sh/uv:0.9.13 AS uv
+# 使用精简版 Python 3.12
+FROM python:3.12-slim
 
-# Builder: install dependencies into /opt/python
-FROM python:3.13-slim AS builder
+# 环境变量：不缓存、无 .pyc，加快启动
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
-ENV UV_COMPILE_BYTECODE=1 \
-    UV_NO_INSTALLER_METADATA=1 \
-    UV_LINK_MODE=copy
+# 安装构建依赖（某些包需要编译）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
+# 安装 uv
+# 官方安装脚本会把 uv 装到 ~/.local/bin 或 ~/.cargo/bin
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 设置工作目录
 WORKDIR /app
 
+# 先拷贝依赖文件（这样依赖没变时可以利用缓存）
 COPY pyproject.toml uv.lock ./
 
-RUN --mount=from=uv,source=/uv,target=/bin/uv \
-    --mount=type=cache,target=/root/.cache/uv \
-    uv export --frozen --no-emit-workspace --no-dev --no-editable -o /tmp/requirements.txt && \
-    uv pip install -r /tmp/requirements.txt --target /opt/python
+# 确保 uv 在 PATH 里
+ENV PATH="/root/.local/bin:/root/.cargo/bin:${PATH}"
 
-# Runtime: install system deps + Playwright browsers, then copy code.
-FROM python:3.13-slim
+# 用 uv 安装依赖到本地虚拟环境（默认 .venv）
+RUN uv sync --frozen --no-install-project
 
-ENV PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1 \
-    APP_MAX_WORKERS=2 \
-    PYTHONPATH="/opt/python" \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+# 再拷贝项目代码（包含 main.py、pc、templates、static、data 等）
+COPY . .
 
-WORKDIR /app
+# 把 .venv 加到 PATH，后面可以直接用 python/uv
+ENV PATH="/app/.venv/bin:${PATH}"
 
-COPY --from=builder /opt/python /opt/python
-COPY . /app
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates && \
-    python -m pip install --no-cache-dir --upgrade pip && \
-    python -m playwright install --with-deps chromium && \
-    apt-get purge -y curl && \
-    apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/*
-
+# 对外暴露 8000（跟你本地一致）
 EXPOSE 8000
-VOLUME ["/data"]
-
-CMD ["uvicorn", "pc.web:app", "--host", "0.0.0.0", "--port", "8000"]

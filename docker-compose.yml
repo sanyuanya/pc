@@ -3,12 +3,25 @@ services:
     image: postgres:18.1
     environment:
       POSTGRES_PASSWORD: "change-me"
-    ports:
-      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/18/main
     restart: unless-stopped
-
+  comment-exporter:
+    container_name: comment-exporter
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - APP_PG_DSN=postgresql://postgres:change-me@postgres:5432/postgres?sslmode=disable
+      - APP_HOST=0.0.0.0
+      - APP_PORT=8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    command: >
+      uv run main.py --serve
 volumes:
   pgdata:
     driver: local

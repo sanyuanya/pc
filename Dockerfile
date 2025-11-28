@@ -33,5 +33,9 @@ COPY . .
 # 把 .venv 加到 PATH，后面可以直接用 python/uv
 ENV PATH="/app/.venv/bin:${PATH}"
 
+# ✅ 在镜像构建阶段就把浏览器装好
+# 只装 chromium，减小体积；如果你想要全家桶可以去掉 “chromium”
+RUN uv run python -m playwright install --with-deps chromium
+
 # 对外暴露 8000（跟你本地一致）
 EXPOSE 8000

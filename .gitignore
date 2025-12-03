@@ -11,3 +11,4 @@ wheels/
 
 # Generated exports / task database
 data/
+.DS_Store

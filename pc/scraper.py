@@ -31,8 +31,10 @@ def choose_user_agent(custom: Optional[str] = None) -> str:
     if custom:
         return custom.strip()
     return DEFAULT_USER_AGENTS[0]
-COMMENTS_API = "https://api.bilibili.com/x/v2/reply/main"
+# 主评论接口改用 WBI 版本，官方要求携带 wts/w_rid
+COMMENTS_API = "https://api.bilibili.com/x/v2/reply/wbi/main"
 COMMENTS_API_LEGACY = "https://api.bilibili.com/x/v2/reply"
+COMMENTS_COUNT_API = "https://api.bilibili.com/x/v2/reply/count"
 SUB_COMMENTS_API = "https://api.bilibili.com/x/v2/reply/reply"
 VIEW_API = "https://api.bilibili.com/x/web-interface/view"
 BLOCKED_TYPES = {"image", "media", "font", "stylesheet"}
@@ -155,6 +157,17 @@ async def _request_with_retry(
     raise RuntimeError(f"评论接口多次失败: {last_error}")
 
 
+async def _fetch_total_count(context: BrowserContext, aid: str) -> Optional[int]:
+    try:
+        resp = await context.request.get(COMMENTS_COUNT_API, params={"type": 1, "oid": aid})
+        data = await resp.json()
+        if data.get("code") == 0:
+            return int((data.get("data") or {}).get("count") or 0)
+    except Exception:
+        pass
+    return None
+
+
 async def _fetch_sub_replies(
     context: BrowserContext,
     *,
@@ -223,13 +236,48 @@ async def fetch_all_comments(
     comments: List[Dict[str, object]] = list(existing_comments or [])
     started = time.monotonic()
     stats = {"main_pages": 0, "sub_pages": 0}
-    reported_total: Optional[int] = None
+    reported_total: Optional[int] = await _fetch_total_count(context, aid)
     cursor_token = start_cursor if start_cursor is not None else ""
     page_counter = 0
     consecutive_stalls = 0
     recent_tokens: Deque[Optional[str]] = deque(maxlen=4)
     fallback_triggered = False
     fallback_page: Optional[int] = None
+
+    def _normalize_offset(token: Optional[object]) -> str:
+        if token is None:
+            return ""
+        if isinstance(token, (dict, list)):
+            try:
+                return json.dumps(token, ensure_ascii=False, separators=(",", ":"))
+            except Exception:
+                return str(token)
+        return str(token)
+
+    def _extract_next_token(pagination_reply: Optional[object]) -> Optional[str]:
+        if not pagination_reply:
+            return None
+        if isinstance(pagination_reply, str):
+            raw = pagination_reply.strip()
+            if raw.startswith("{"):
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        nested = parsed.get("next_offset") or parsed.get("offset") or parsed.get("offset_v2")
+                        if nested:
+                            return _normalize_offset(nested)
+                except Exception:
+                    pass
+            return raw
+        if isinstance(pagination_reply, dict):
+            for key in ("next_offset", "offset", "offset_v2", "next"):
+                val = pagination_reply.get(key)
+                if val:
+                    return _normalize_offset(val)
+            offset = pagination_reply.get("pagination") or pagination_reply.get("page")
+            if offset:
+                return _normalize_offset(offset)
+        return None
 
     while True:
         page_batch: List[Dict[str, object]] = []
@@ -238,7 +286,9 @@ async def fetch_all_comments(
             print("[WARN] 达到用户设置的时间上限，可能仍有评论未抓取")
             break
         params = dict(base_params)
-        pagination_payload = {"offset": cursor_token or ""}
+        request_page = page_counter + 1
+        offset_value = _normalize_offset(cursor_token) if cursor_token else _normalize_offset({"type": 1, "direction": 1, "data": {"pn": request_page}})
+        pagination_payload = {"offset": offset_value}
         params["pagination_str"] = json.dumps(pagination_payload, ensure_ascii=False, separators=(",", ":"))
         params["plat"] = 1
         params["web_location"] = 1315875
@@ -286,13 +336,11 @@ async def fetch_all_comments(
                 comments.extend(extra)
                 page_batch.extend(extra)
         pagination_reply = cursor.get("pagination_reply")
-        next_token: Optional[str] = None
-        if isinstance(pagination_reply, str):
-            next_token = pagination_reply
-        elif isinstance(pagination_reply, dict):
-            val = pagination_reply.get("next_offset") or pagination_reply.get("next")
-            if isinstance(val, str):
-                next_token = val
+        next_token: Optional[str] = _extract_next_token(pagination_reply)
+        if not next_token:
+            raw_next = cursor.get("next")
+            if isinstance(raw_next, int) and raw_next > 0:
+                next_token = _normalize_offset({"type": 1, "direction": 1, "data": {"pn": raw_next}})
         if progress_handler:
             payload = {
                 "page": page_counter,

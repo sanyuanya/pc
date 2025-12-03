@@ -345,8 +345,13 @@
         <button type="button" id="wordcloud-refresh" class="btn btn-secondary">{{ _("wordcloud_refresh") }}</button>
       </div>
       <div class="card-body">
-        <div style="width: 100%; aspect-ratio: 16 / 9; background: #050816; border-radius: var(--radius-md); overflow: hidden; display: flex; align-items: center; justify-content: center;">
-          <img id="wordcloud-img" src="/tasks/{{ task.id }}/wordcloud.png?v={{ task.updated_at|urlencode }}" alt="wordcloud" style="width: 100%; height: 100%; object-fit: contain;">
+        <div id="wordcloud-box" data-has-comments="{{ has_comments | int }}" style="width: 100%; aspect-ratio: 16 / 9; background: radial-gradient(120% 160% at 50% 40%, #1e2636 0%, #0d111a 55%, #05070d 100%); border-radius: var(--radius-md); overflow: hidden; display: flex; align-items: center; justify-content: center; position: relative;">
+          <div id="wordcloud-placeholder" style="position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text-muted); gap: 0.5rem; text-align: center; padding: 1rem;">
+            <div style="width: 52px; height: 52px; border-radius: 999px; border: 1px dashed var(--border-color); display: inline-flex; align-items: center; justify-content: center; font-size: 20px;">☁️</div>
+            <div style="font-weight: 600;">{{ _("wordcloud_empty_title") }}</div>
+            <div style="font-size: 0.9rem; color: var(--text-tertiary); max-width: 320px;">{{ _("wordcloud_empty_desc") }}</div>
+          </div>
+          <img id="wordcloud-img" src="/tasks/{{ task.id }}/wordcloud.png?v={{ task.updated_at|urlencode }}" alt="wordcloud" style="width: 100%; height: 100%; object-fit: contain; opacity: 0; transition: opacity 0.2s ease;">
         </div>
         <p class="text-muted text-sm" style="margin-top: 0.75rem;">{{ _("wordcloud_desc") }}</p>
       </div>
@@ -477,9 +482,29 @@
   (() => {
     const img = document.getElementById('wordcloud-img');
     const refreshBtn = document.getElementById('wordcloud-refresh');
+    const box = document.getElementById('wordcloud-box');
+    const placeholder = document.getElementById('wordcloud-placeholder');
     if (!img || !refreshBtn) {
       return;
     }
+
+    const showImage = () => {
+      if (placeholder) placeholder.style.display = 'none';
+      img.style.opacity = '1';
+    };
+
+    const showPlaceholder = () => {
+      if (placeholder) placeholder.style.display = 'flex';
+      img.style.opacity = '0';
+    };
+
+    if (box && box.dataset.hasComments === '1') {
+      img.onload = () => showImage();
+      img.onerror = () => showPlaceholder();
+    } else {
+      showPlaceholder();
+    }
+
     refreshBtn.addEventListener('click', () => {
       refreshBtn.disabled = true;
       const baseUrl = `/tasks/{{ task.id }}/wordcloud.png`;
@@ -492,8 +517,8 @@
         img.onload = null;
         img.onerror = null;
       };
-      img.onload = reset;
-      img.onerror = reset;
+      img.onload = () => { showImage(); reset(); };
+      img.onerror = () => { showPlaceholder(); reset(); };
     });
   })();
 </script>

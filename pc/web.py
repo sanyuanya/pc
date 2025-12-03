@@ -5,6 +5,7 @@ import asyncio
 import csv
 import json
 import math
+import time
 import os
 import random
 from pathlib import Path
@@ -30,6 +31,53 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 TEMPLATES_DIR = ROOT_DIR / "templates"
 STATIC_DIR = ROOT_DIR / "static"
 MAX_STATE_FILE_SIZE = 512 * 1024  # 这里限制上传文件大小，避免异常文件
+
+
+def _validate_state_payload(payload: dict) -> tuple[bool, str]:
+    """校验 storage_state 是否包含有效的 B 站登录 Cookie。"""
+
+    if not isinstance(payload, dict):
+        return False, "invalid_schema"
+
+    cookies = payload.get("cookies")
+    if not isinstance(cookies, list) or not cookies:
+        return False, "missing_cookies"
+    bilibili_cookies = [
+        c for c in cookies if isinstance(c, dict) and "bilibili.com" in str(c.get("domain") or "")
+    ]
+    if not bilibili_cookies:
+        return False, "missing_domain"
+    auth_cookies = [c for c in bilibili_cookies if c.get("name") in {"SESSDATA", "bili_jct"}]
+    if not auth_cookies:
+        return False, "missing_auth"
+    now = time.time()
+    # 若所有关键 Cookie 都过期则视为失效
+    expired = True
+    for item in auth_cookies:
+        expires = item.get("expires")
+        if isinstance(expires, (int, float)):
+            if expires > now:
+                expired = False
+                break
+        else:
+            expired = False  # 没有过期时间或格式不明，视为暂时有效
+            break
+    if expired:
+        return False, "expired"
+    return True, ""
+
+
+def _validate_state_file(path: Path) -> tuple[bool, str]:
+    if not path.exists() or path.stat().st_size <= 0:
+        return False, "empty"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False, "invalid_json"
+    try:
+        return _validate_state_payload(payload)
+    except Exception:
+        return False, "invalid_schema"
 
 
 class TaskManager:
@@ -216,6 +264,7 @@ class TaskManager:
         output_path = self.exports_dir / f"{task_id}{suffix}"
         duration = record.timeout if record.timeout and record.timeout > 0 else None
         streaming_to_db = bool(self.pg_sink)
+        reported_total_hint: list[Optional[int]] = [None]
         self.store.update_task(
             task_id,
             status="running",
@@ -225,13 +274,32 @@ class TaskManager:
         self._log(task_id, f"开始抓取任务，URL={record.normalized_url}")
         # auth candidates
         auth_candidates: List[Optional[Path]] = []
-        for _, path in self.store.list_auth_states(user_id=record.user_id):
+
+        def _append_if_valid(state_path: Path, label: str) -> None:
+            try:
+                ok, reason = _validate_state_file(state_path)
+            except Exception as exc:  # 防御性处理，坏文件不影响游客抓取
+                ok, reason = False, f"unexpected: {exc}"
+            if ok:
+                auth_candidates.append(state_path)
+                return
+            reason_map = {
+                "empty": "文件为空",
+                "invalid_json": "JSON 解析失败",
+                "invalid_schema": "结构异常",
+                "missing_cookies": "缺少 cookies 字段",
+                "missing_domain": "未包含 bilibili 域名",
+                "missing_auth": "未包含 SESSDATA 或 bili_jct",
+                "expired": "关键 Cookie 已过期",
+            }
+            self._log(task_id, f"忽略无效登录态 {label}: {reason_map.get(reason, reason)}")
+
+        for lbl, path in self.store.list_auth_states(user_id=record.user_id):
             candidate = Path(path)
-            if candidate.exists() and candidate.stat().st_size > 0:
-                auth_candidates.append(candidate)
+            _append_if_valid(candidate, lbl)
         default_state = self.get_state_file(record.user_id, "default")
-        if default_state.exists() and default_state.stat().st_size > 0:
-            auth_candidates.append(default_state)
+        if default_state.exists():
+            _append_if_valid(default_state, "default")
         auth_candidates.append(None)
         random.shuffle(auth_candidates)
 
@@ -330,6 +398,12 @@ class TaskManager:
                         }
                         self._save_resume_state(task_id, payload)
                         total = info.get("reported_total")
+                        if total:
+                            try:
+                                reported_total_hint[0] = int(total)
+                                self.store.update_task(task_id, total_comments=int(total))
+                            except Exception:
+                                pass
                         self._log(
                             task_id,
                             f"主楼翻页 progress: page={info.get('page')} next_token={str(info.get('next_token'))[:30]} reported_total={total}",
@@ -364,6 +438,14 @@ class TaskManager:
                             await flush_buffer(result.aid, result.bvid, result.title)
                         success = True
                         self.retry_state.pop(task_id, None)
+                        # 若接口声明总数大于已抓取数量，则认为不完整，标记失败便于重试
+                        reported_total = result.reported_total or (reported_total_hint[0] or 0)
+                        incomplete = reported_total > 0 and len(result.comments) < reported_total
+                        if incomplete:
+                            success = False
+                            last_error = f"抓取未完成（已取 {len(result.comments)}/{reported_total}）"
+                            attempt_cache = list(result.comments)
+                            break
                         self._clear_resume_state(task_id)
                         self._log(
                             task_id,
@@ -373,7 +455,7 @@ class TaskManager:
                             task_id,
                             status="completed",
                             output_path=str(result.output_path) if result.output_path else None,
-                            total_comments=len(result.comments),
+                            total_comments=reported_total or len(result.comments),
                             bvid=result.bvid,
                             aid=result.aid,
                             title=result.title,
@@ -409,7 +491,7 @@ class TaskManager:
 
         if not success:
             partial_count = len(attempt_cache)
-            total_counts = partial_count
+            total_counts = reported_total_hint[0] or partial_count
             if self.pg_sink and meta.get("bvid"):
                 try:
                     stats = await self.pg_sink.aggregate_stats(bvid=meta["bvid"])  # type: ignore[arg-type]
@@ -803,7 +885,10 @@ def create_app(
         total_pages = max(1, math.ceil(total / page_size))
         state_root = manager.get_storage_state_path(user.id)
         auth_states = store.list_auth_states(user_id=user.id)
-        has_auth = any(Path(p).exists() and Path(p).stat().st_size > 0 for _, p in auth_states)
+        has_auth = any(_validate_state_file(Path(p))[0] for _, p in auth_states)
+        default_state = manager.get_state_file(user.id, "default")
+        if not has_auth:
+            has_auth = _validate_state_file(default_state)[0]
         flash_retry = request.query_params.get("retried")
         return render_template(
             "index.html",
@@ -840,7 +925,10 @@ def create_app(
             return login_redirect(request)
         state_root = manager.get_storage_state_path(user.id)
         states = store.list_auth_states(user_id=user.id)
-        has_auth = any(Path(p).exists() and Path(p).stat().st_size > 0 for _, p in states)
+        has_auth = any(_validate_state_file(Path(p))[0] for _, p in states)
+        default_state = manager.get_state_file(user.id, "default")
+        if not has_auth:
+            has_auth = _validate_state_file(default_state)[0]
         lang = request.cookies.get("lang", "zh")
         def _(key: str, **kwargs) -> str: return get_trans(lang, key, **kwargs)
         error_message: Optional[str] = None
@@ -904,6 +992,13 @@ def create_app(
                 return _error("settings_auth_error_json")
             if not isinstance(payload, dict) or (not payload.get("cookies") and not payload.get("origins")):
                 return _error("settings_auth_error_schema")
+            valid, reason = _validate_state_payload(payload)
+            if not valid:
+                if reason == "expired":
+                    return _error("settings_auth_error_expired")
+                if reason == "invalid_schema":
+                    return _error("settings_auth_error_schema2")
+                return _error("settings_auth_error_invalid")
 
             target_path = manager.get_state_file(user.id, label)
             target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -980,6 +1075,30 @@ def create_app(
             synced=synced,
             ua_list=ua_list,
         )
+
+    @app.get("/api/tasks", response_class=JSONResponse)
+    async def api_tasks(
+        request: Request,
+        page: int = 1,
+        q: Optional[str] = None,
+    ) -> JSONResponse:
+        user = get_current_user(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="unauthorized")
+        page = max(1, page)
+        page_size = 8
+        tasks, total = store.list_tasks(search=q, page=page, page_size=page_size, user_id=user.id)
+        payload = [
+            {
+                "id": t.id,
+                "status": t.status,
+                "total_comments": t.total_comments,
+                "error": t.error,
+                "title": t.title,
+            }
+            for t in tasks
+        ]
+        return JSONResponse({"tasks": payload, "total": total})
 
     @app.post("/tasks")
     async def create_tasks(
@@ -1274,6 +1393,7 @@ def create_app(
                 "task": task,
                 "comments": comments,
                 "comment_stats": stats,
+                "has_comments": bool((stats or {}).get("total")),
                 "filtered_total": filtered_total,
                 "page": page,
                 "page_size": page_size,
